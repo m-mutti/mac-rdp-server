@@ -29,10 +29,12 @@ final class HostSession {
     let link: SessionLink
     let streams: StreamSet
     let webAuthn: WebAuthnRelay
+    let clipboard: ClipboardSync
     let injector: InputInjector
     private(set) var layout: MonitorLayout
     private let options: RDPHost.Options
-    private let displays = VirtualDisplayManager()
+    /// Shared by all sessions: a new session replaces the previous one's displays.
+    private let displays: VirtualDisplayManager
     private var monitors: [VirtualMonitor] = []
     private var cursor: CursorMirror?
     private var generation: UInt32 = 0
@@ -48,8 +50,10 @@ final class HostSession {
     private var virtualKey: AnyObject?
 
     init(link: SessionLink, layout: MonitorLayout, options: RDPHost.Options, streams: StreamSet,
-         webAuthn: WebAuthnRelay) {
+         webAuthn: WebAuthnRelay, clipboard: ClipboardChannel, displays: VirtualDisplayManager) {
         self.link = link
+        self.displays = displays
+        self.clipboard = ClipboardSync(channel: clipboard)
         self.layout = layout
         self.options = options
         self.streams = streams
@@ -60,13 +64,17 @@ final class HostSession {
     func begin() async {
         reconfiguring = true
         do {
-            monitors = try await displays.apply(layout, scaling: options.scaling, physical: options.physical)
+            monitors = try await displays.apply(layout, scaling: options.scaling, physical: options.physical,
+                                                owner: link.id)
         } catch {
             fail("cannot create virtual displays: \(error)")
             reconfiguring = false
             return
         }
-        guard !ended else { return displays.teardown() }
+        guard !ended else {
+            displays.teardown(owner: link.id)
+            return
+        }
         injector.target(layout: layout, monitors: monitors)
         describeDisplays()
         displaysReady = true
@@ -90,12 +98,12 @@ final class HostSession {
 
     func end() async {
         ended = true
+        clipboard.stop()
         webAuthn.close()
         virtualKey = nil
         await stopStreams()
         injector.releaseAll()
-        displays.teardown()
-        log("virtual displays removed")
+        if displays.teardown(owner: link.id) { log("virtual displays removed") }
     }
 
     // MARK: Security keys
@@ -151,7 +159,8 @@ final class HostSession {
         log("client layout changed")
         await stopStreams()
         do {
-            monitors = try await displays.apply(new, scaling: options.scaling, physical: options.physical)
+            monitors = try await displays.apply(new, scaling: options.scaling, physical: options.physical,
+                                                owner: link.id)
         } catch {
             fail("cannot create virtual displays: \(error)")
             return

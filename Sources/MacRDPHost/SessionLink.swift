@@ -86,6 +86,40 @@ final class SessionLink: @unchecked Sendable {
         }
     }
 
+    func clipboardOffer(_ formats: [(id: UInt32, name: String?)]) {
+        lock.withLock {
+            guard let handle else { return }
+            let names = formats.map { $0.name.flatMap { strdup($0) } }
+            defer { names.forEach { free($0) } }
+            let list = zip(formats, names).map { mrs_clip_format(id: $0.0.id, name: UnsafePointer($0.1)) }
+            _ = list.withUnsafeBufferPointer {
+                mrs_session_clipboard_offer(handle, $0.baseAddress, UInt32($0.count))
+            }
+        }
+    }
+
+    /// False once the session is gone.
+    func clipboardFetch(_ id: UInt32) -> Bool {
+        lock.withLock {
+            guard let handle else { return false }
+            return mrs_session_clipboard_fetch(handle, id) == 0
+        }
+    }
+
+    /// Answers Windows' paste; nil reports that the Mac clipboard couldn't provide it.
+    func clipboardSend(_ data: Data?) {
+        lock.withLock {
+            guard let handle else { return }
+            guard let data else {
+                mrs_session_clipboard_send(handle, nil, 0)
+                return
+            }
+            _ = data.withUnsafeBytes { raw in
+                mrs_session_clipboard_send(handle, raw.baseAddress?.assumingMemoryBound(to: UInt8.self), raw.count)
+            }
+        }
+    }
+
     func close() {
         lock.withLock {
             guard let handle else { return }

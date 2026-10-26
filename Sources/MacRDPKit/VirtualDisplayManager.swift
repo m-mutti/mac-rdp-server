@@ -49,14 +49,19 @@ public final class VirtualDisplayManager {
 
     private var displays: [CGVirtualDisplay] = []
     public private(set) var monitors: [VirtualMonitor] = []
+    /// Which session the current displays belong to.
+    public private(set) var owner: Int?
 
     public init() {}
 
-    /// Replaces any existing virtual displays with ones matching `layout`.
+    /// Replaces any existing virtual displays, whoever they belong to, with
+    /// ones matching `layout`, owned by `owner`.
     public func apply(_ layout: MonitorLayout,
                       scaling: ScalingPolicy,
-                      physical: PhysicalDisplayPolicy) async throws -> [VirtualMonitor] {
-        teardown()
+                      physical: PhysicalDisplayPolicy,
+                      owner: Int? = nil) async throws -> [VirtualMonitor] {
+        await removeAll()
+        self.owner = owner
         let physicalIDs = Self.onlineDisplays()
 
         var created: [VirtualMonitor] = []
@@ -80,9 +85,11 @@ public final class VirtualDisplayManager {
         return created
     }
 
-    /// Removes all virtual displays; macOS restores the physical arrangement.
-    public func teardown() {
-        guard !displays.isEmpty else { return }
+    /// Removes the virtual displays if `owner` still owns them (nil: whoever
+    /// does); macOS restores the physical arrangement. Returns whether any were removed.
+    @discardableResult
+    public func teardown(owner: Int? = nil) -> Bool {
+        guard !displays.isEmpty, owner == nil || owner == self.owner else { return false }
         let virtualIDs = Set(displays.map(\.displayID))
         var config: CGDisplayConfigRef?
         if CGBeginDisplayConfiguration(&config) == .success {
@@ -93,6 +100,19 @@ public final class VirtualDisplayManager {
         }
         displays.removeAll()
         monitors.removeAll()
+        self.owner = nil
+        return true
+    }
+
+    /// Removes every display and waits until macOS has let go of them: until
+    /// then, displays with the same identity can't be created, and leftovers
+    /// would be mistaken for physical screens.
+    public func removeAll() async {
+        let removed = Set(displays.map(\.displayID))
+        guard teardown() else { return }
+        for _ in 0..<40 where Self.onlineDisplays().contains(where: removed.contains) {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
     }
 
     private func makeDisplay(index: Int, mode: VirtualDisplayMode, spec: MonitorSpec) throws -> CGVirtualDisplay {

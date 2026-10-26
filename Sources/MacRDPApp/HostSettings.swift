@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -55,17 +56,27 @@ struct Permissions: Equatable {
     var screenRecording: Bool
     /// Windows' keyboard and mouse control the Mac.
     var accessibility: Bool
+    /// Windows can paste what's copied on the Mac without macOS asking each
+    /// time. Optional: copying from Windows to the Mac works regardless.
+    var clipboard: Bool
 
     var allGranted: Bool { screenRecording && accessibility }
 
     static func current() -> Permissions {
-        Permissions(screenRecording: CGPreflightScreenCaptureAccess(), accessibility: AXIsProcessTrusted())
+        Permissions(screenRecording: CGPreflightScreenCaptureAccess(), accessibility: AXIsProcessTrusted(),
+                    clipboard: clipboardAlwaysAllowed())
+    }
+
+    private static func clipboardAlwaysAllowed() -> Bool {
+        if #available(macOS 15.4, *) { return NSPasteboard.general.accessBehavior == .alwaysAllow }
+        return true // no clipboard privacy before macOS 15.4
     }
 }
 
 enum PrivacyPane: String {
     case screenRecording = "Privacy_ScreenCapture"
     case accessibility = "Privacy_Accessibility"
+    case clipboard = "Privacy_Pasteboard"
 
     var url: URL {
         URL(string: "x-apple.systempreferences:com.apple.preference.security?\(rawValue)")!

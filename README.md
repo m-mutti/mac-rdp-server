@@ -74,7 +74,8 @@ screen goes back to normal. **Save Remote Desktop File…** in the app creates a
 | Monitors: any number, mixed resolutions and scaling | ✅ Works |
 | Keyboard and mouse, including the scroll wheel, back/forward buttons and typed text from any language | ✅ Works |
 | Security keys and Windows Hello (FIDO2, passkeys) | 🚧 Built in. Mac apps can use them once Apple approves this app's virtual-device permission (macOS 15 or later) |
-| Clipboard: text, images and files | Planned |
+| Clipboard: text, formatted text and images, both ways | ✅ Built in |
+| Clipboard: files | Planned |
 | Speakers and headset | Planned |
 | Microphone | Planned |
 | Drives and folders | Planned |
@@ -89,7 +90,7 @@ problem that needs attention. **Settings** has four tabs:
 | Tab | What it's for |
 |---|---|
 | Sign-in | See the user name and password (show, copy, generate) and change them |
-| Permissions | Check Screen Recording and Accessibility, and fix them |
+| Permissions | Check Screen Recording, Accessibility and clipboard access, and fix them |
 | Connection | Start or stop the server, change the port, save a `.rdp` file |
 | Display & Keyboard | Windows key or Ctrl as ⌘, scaling, what the Mac's own screen shows |
 
@@ -102,13 +103,18 @@ problem that needs attention. **Settings** has four tabs:
   the list in System Settings with **−**, then allow it again.
 - **Can't connect:** check the address in the menu, and that the Mac is awake and logged in.
   The server uses TCP port 3389.
+- **Copy and paste doesn't cross over:** in Remote Desktop Connection, open **Show Options ›
+  Local Resources** and tick **Clipboard**. Other clipboard-sharing apps can get in the way.
+- **macOS asks before Windows can paste:** macOS 15.4 and later can ask each time another app
+  reads the clipboard. In Settings › Permissions, set Clipboard to *Always Allow*.
 - **Security keys aren't offered:** in Remote Desktop Connection, open **Show Options › Local
   Resources › More…** and tick **WebAuthn (Windows Hello or security keys)**.
 - **Logs:** menu bar › **Open Log**, or `~/Library/Logs/mac-rdp-server.log`.
 
 ## Limitations
 
-- One Windows connection at a time.
+- One Windows connection at a time. A new connection takes over: the previous one is
+  disconnected and the Mac's displays are rebuilt for the new PC's monitors.
 - The Mac must already be logged in; connecting to the login screen isn't supported yet.
 - Releases aren't signed or notarized yet. Until they are, macOS asks for permissions again
   after each update.
@@ -142,9 +148,9 @@ without the menu bar app, and `set-password`, `rdp-file` and `doctor` cover setu
 
 | Path | Contents |
 |---|---|
-| `Sources/CRDPServer` | C layer over FreeRDP's server: sessions, graphics, display control, WebAuthn |
-| `Sources/MacRDPKit` | macOS pieces: virtual displays, capture, H.264, input, CBOR/CTAP |
-| `Sources/MacRDPHost` | The server: sessions, streams, cursor, sign-in, security key |
+| `Sources/CRDPServer` | C layer over FreeRDP's server: sessions, graphics, display control, WebAuthn, clipboard |
+| `Sources/MacRDPKit` | macOS pieces: virtual displays, capture, H.264, input, CBOR/CTAP, clipboard formats |
+| `Sources/MacRDPHost` | The server: sessions, streams, cursor, sign-in, security key, clipboard |
 | `Sources/MacRDPApp` | The menu bar app: setup, settings, status |
 | `Sources/mac-rdp-server` | Entry point and command line |
 

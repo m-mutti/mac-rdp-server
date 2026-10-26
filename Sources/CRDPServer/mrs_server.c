@@ -32,6 +32,7 @@
 #include <freerdp/server/disp.h>
 #include <freerdp/server/rdpgfx.h>
 #include <freerdp/channels/rdpewa.h>
+#include <freerdp/server/cliprdr.h>
 #include <freerdp/settings.h>
 
 #define MRS_CERT_NAME "server"
@@ -75,6 +76,9 @@ typedef enum {
     MRS_JOB_POINTER,
     MRS_JOB_RESET,
     MRS_JOB_WEBAUTHN,
+    MRS_JOB_CLIP_OFFER,
+    MRS_JOB_CLIP_FETCH,
+    MRS_JOB_CLIP_SEND,
     MRS_JOB_CLOSE
 } mrs_job_kind;
 
@@ -111,6 +115,10 @@ typedef struct {
     HANDLE ewa_event;
     UINT32 ewa_channel_id;
     BOOL ewa_requested;
+    // Clipboard (MS-RDPECLIP), when the client shares its clipboard.
+    CliprdrServerContext *clip;
+    BOOL clip_started;
+    BOOL clip_ready;
     BOOL activated, started, gfx_opened, gfx_ready, disp_opened, closing;
 
     // Owned by the session thread.
@@ -436,6 +444,155 @@ static void mrs_send_webauthn(mrs_peer *p, const mrs_job *job) {
         mrs_log("could not send a WebAuthn request");
 }
 
+// MARK: - Clipboard
+
+// Offered formats travel through the job queue packed as
+// [uint32 id][uint16 name length][name bytes], repeated.
+
+static void mrs_run_clipboard_job(mrs_peer *p, const mrs_job *job) {
+    CliprdrServerContext *clip = p->clip;
+    if (!p->clip_started)
+        return;
+    UINT rc = CHANNEL_RC_OK;
+    switch (job->kind) {
+    case MRS_JOB_CLIP_OFFER: {
+        CLIPRDR_FORMAT formats[64];
+        char *names[64] = {0};
+        uint32_t count = 0;
+        size_t at = 0;
+        while (count < 64 && at + 6 <= job->length) {
+            uint32_t id;
+            uint16_t name_length;
+            memcpy(&id, job->data + at, 4);
+            memcpy(&name_length, job->data + at + 4, 2);
+            at += 6;
+            if (at + name_length > job->length)
+                break;
+            names[count] = name_length ? strndup((const char *)job->data + at, name_length) : NULL;
+            formats[count] = (CLIPRDR_FORMAT){.formatId = id, .formatName = names[count]};
+            at += name_length;
+            count++;
+        }
+        const CLIPRDR_FORMAT_LIST list = {
+            .common = {.msgType = CB_FORMAT_LIST}, .numFormats = count, .formats = formats};
+        rc = clip->ServerFormatList(clip, &list);
+        for (uint32_t i = 0; i < count; i++)
+            free(names[i]);
+        break;
+    }
+    case MRS_JOB_CLIP_FETCH: {
+        const CLIPRDR_FORMAT_DATA_REQUEST request = {
+            .common = {.msgType = CB_FORMAT_DATA_REQUEST}, .requestedFormatId = job->index};
+        rc = clip->ServerFormatDataRequest(clip, &request);
+        break;
+    }
+    case MRS_JOB_CLIP_SEND: {
+        const BOOL ok = job->generation != 0;
+        const CLIPRDR_FORMAT_DATA_RESPONSE response = {
+            .common = {.msgType = CB_FORMAT_DATA_RESPONSE,
+                       .msgFlags = ok ? CB_RESPONSE_OK : CB_RESPONSE_FAIL,
+                       .dataLen = ok ? (UINT32)job->length : 0},
+            .requestedFormatData = ok ? job->data : NULL,
+        };
+        rc = clip->ServerFormatDataResponse(clip, &response);
+        break;
+    }
+    default:
+        break;
+    }
+    if (rc != CHANNEL_RC_OK)
+        mrs_log("clipboard message failed (%u)", rc);
+}
+
+/// Clients announce capabilities, then what they copied; some skip the
+/// capabilities, so either one means sharing is ready.
+static void mrs_clip_mark_ready(mrs_peer *p) {
+    if (p->clip_ready)
+        return;
+    p->clip_ready = TRUE;
+    p->server->callbacks.clipboard_ready(p->server->callbacks.user, as_session(p));
+}
+
+static UINT mrs_clip_client_capabilities(CliprdrServerContext *clip,
+                                         const CLIPRDR_CAPABILITIES *caps) {
+    WINPR_UNUSED(caps);
+    mrs_clip_mark_ready(clip->custom);
+    return CHANNEL_RC_OK;
+}
+
+static UINT mrs_clip_client_format_list(CliprdrServerContext *clip,
+                                        const CLIPRDR_FORMAT_LIST *list) {
+    mrs_peer *p = clip->custom;
+    mrs_clip_mark_ready(p);
+    const CLIPRDR_FORMAT_LIST_RESPONSE ack = {
+        .common = {.msgType = CB_FORMAT_LIST_RESPONSE, .msgFlags = CB_RESPONSE_OK}};
+    const UINT rc = clip->ServerFormatListResponse(clip, &ack);
+    mrs_clip_format formats[64];
+    const uint32_t count = list->numFormats < 64 ? list->numFormats : 64;
+    for (uint32_t i = 0; i < count; i++)
+        formats[i] = (mrs_clip_format){.id = list->formats[i].formatId,
+                                       .name = list->formats[i].formatName};
+    p->server->callbacks.clipboard_offer(p->server->callbacks.user, as_session(p), formats, count);
+    return rc;
+}
+
+static UINT mrs_clip_client_data_request(CliprdrServerContext *clip,
+                                         const CLIPRDR_FORMAT_DATA_REQUEST *request) {
+    mrs_peer *p = clip->custom;
+    p->server->callbacks.clipboard_request(p->server->callbacks.user, as_session(p),
+                                           request->requestedFormatId);
+    return CHANNEL_RC_OK;
+}
+
+static UINT mrs_clip_client_data_response(CliprdrServerContext *clip,
+                                          const CLIPRDR_FORMAT_DATA_RESPONSE *response) {
+    mrs_peer *p = clip->custom;
+    const BOOL ok = (response->common.msgFlags & CB_RESPONSE_OK) != 0;
+    p->server->callbacks.clipboard_data(p->server->callbacks.user, as_session(p),
+                                        ok ? response->requestedFormatData : NULL,
+                                        ok ? response->common.dataLen : 0);
+    return CHANNEL_RC_OK;
+}
+
+static UINT mrs_clip_ignore_format_list_response(CliprdrServerContext *clip,
+                                                 const CLIPRDR_FORMAT_LIST_RESPONSE *response) {
+    WINPR_UNUSED(clip);
+    WINPR_UNUSED(response);
+    return CHANNEL_RC_OK;
+}
+
+static UINT mrs_clip_ignore_temp_directory(CliprdrServerContext *clip,
+                                           const CLIPRDR_TEMP_DIRECTORY *dir) {
+    WINPR_UNUSED(clip);
+    WINPR_UNUSED(dir);
+    return CHANNEL_RC_OK;
+}
+
+/// Starts clipboard sharing if the client joined the clipboard channel.
+static void mrs_start_clipboard(mrs_peer *p) {
+    if (!WTSVirtualChannelManagerIsChannelJoined(p->vcm, CLIPRDR_SVC_CHANNEL_NAME))
+        return;
+    CliprdrServerContext *clip = cliprdr_server_context_new(p->vcm);
+    if (!clip)
+        return;
+    clip->custom = p;
+    clip->rdpcontext = &p->base;
+    clip->useLongFormatNames = TRUE;
+    clip->streamFileClipEnabled = FALSE;
+    clip->fileClipNoFilePaths = TRUE;
+    clip->canLockClipData = FALSE;
+    clip->ClientCapabilities = mrs_clip_client_capabilities;
+    clip->ClientFormatList = mrs_clip_client_format_list;
+    clip->ClientFormatListResponse = mrs_clip_ignore_format_list_response;
+    clip->ClientFormatDataRequest = mrs_clip_client_data_request;
+    clip->ClientFormatDataResponse = mrs_clip_client_data_response;
+    clip->TempDirectory = mrs_clip_ignore_temp_directory;
+    p->clip = clip;
+    p->clip_started = clip->Start(clip) == CHANNEL_RC_OK;
+    if (!p->clip_started)
+        mrs_log("could not start clipboard sharing");
+}
+
 static void mrs_run_jobs(mrs_peer *p) {
     pthread_mutex_lock(&p->lock);
     mrs_job *job = p->head;
@@ -465,6 +622,11 @@ static void mrs_run_jobs(mrs_peer *p) {
             break;
         case MRS_JOB_WEBAUTHN:
             mrs_send_webauthn(p, job);
+            break;
+        case MRS_JOB_CLIP_OFFER:
+        case MRS_JOB_CLIP_FETCH:
+        case MRS_JOB_CLIP_SEND:
+            mrs_run_clipboard_job(p, job);
             break;
         case MRS_JOB_CLOSE:
             p->closing = TRUE;
@@ -540,6 +702,44 @@ int mrs_session_webauthn_send(mrs_session *session, const uint8_t *data, size_t 
     if (!job)
         return -1;
     memcpy(job->data, data, length);
+    return mrs_enqueue(as_peer(session), job);
+}
+
+int mrs_session_clipboard_offer(mrs_session *session, const mrs_clip_format *formats,
+                                uint32_t count) {
+    size_t length = 0;
+    for (uint32_t i = 0; i < count; i++)
+        length += 6 + (formats[i].name ? strlen(formats[i].name) : 0);
+    mrs_job *job = mrs_job_new(MRS_JOB_CLIP_OFFER, length);
+    if (!job)
+        return -1;
+    size_t at = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint16_t name_length = formats[i].name ? (uint16_t)strlen(formats[i].name) : 0;
+        memcpy(job->data + at, &formats[i].id, 4);
+        memcpy(job->data + at + 4, &name_length, 2);
+        if (name_length)
+            memcpy(job->data + at + 6, formats[i].name, name_length);
+        at += 6 + name_length;
+    }
+    return mrs_enqueue(as_peer(session), job);
+}
+
+int mrs_session_clipboard_fetch(mrs_session *session, uint32_t format_id) {
+    mrs_job *job = mrs_job_new(MRS_JOB_CLIP_FETCH, 0);
+    if (!job)
+        return -1;
+    job->index = format_id;
+    return mrs_enqueue(as_peer(session), job);
+}
+
+int mrs_session_clipboard_send(mrs_session *session, const uint8_t *data, size_t length) {
+    mrs_job *job = mrs_job_new(MRS_JOB_CLIP_SEND, data ? length : 0);
+    if (!job)
+        return -1;
+    job->generation = data != NULL; // success flag
+    if (data)
+        memcpy(job->data, data, length);
     return mrs_enqueue(as_peer(session), job);
 }
 
@@ -726,6 +926,8 @@ static void mrs_peer_context_free(freerdp_peer *client, rdpContext *context) {
         rdpgfx_server_context_free(p->gfx);
     if (p->disp)
         disp_server_context_free(p->disp);
+    if (p->clip)
+        cliprdr_server_context_free(p->clip);
     for (mrs_job *job = p->head; job;) {
         mrs_job *next = job->next;
         free(job);
@@ -781,6 +983,7 @@ static BOOL mrs_post_connect(freerdp_peer *client) {
         p->disp->ChannelIdAssigned = mrs_disp_channel_assigned;
     }
     WTSVirtualChannelManagerSetDVCCreationCallback(p->vcm, mrs_dvc_created, p);
+    mrs_start_clipboard(p);
     return TRUE;
 }
 
@@ -885,6 +1088,8 @@ static DWORD WINAPI mrs_session_thread(LPVOID arg) {
         (void)p->gfx->Close(p->gfx);
     if (p->ewa_channel)
         (void)WTSVirtualChannelClose(p->ewa_channel);
+    if (p->clip_started)
+        (void)p->clip->Stop(p->clip);
     if (p->started)
         server->callbacks.session_ended(server->callbacks.user, as_session(p));
 

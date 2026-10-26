@@ -30,6 +30,15 @@ typedef struct {
     uint32_t scale_percent;
 } mrs_monitor;
 
+/// One clipboard format (MS-RDPECLIP): a standard Windows ID such as 13 (Unicode
+/// text) or 8 (bitmap), or a registered format such as "HTML Format" whose ID
+/// its sender picks.
+typedef struct {
+    uint32_t id;
+    /// NULL for standard formats.
+    const char *name;
+} mrs_clip_format;
+
 /// Callbacks run on the session thread unless noted. They must return quickly.
 typedef struct {
     void *user;
@@ -59,6 +68,15 @@ typedef struct {
     /// HRESULT followed by a command-specific payload (MS-RDPEWA 2.2.2).
     void (*webauthn_response)(void *user, mrs_session *session, const uint8_t *data,
                               size_t length);
+    /// The client shares its clipboard. Clipboard callbacks run on the clipboard thread.
+    void (*clipboard_ready)(void *user, mrs_session *session);
+    /// The client copied something it can provide in `formats`.
+    void (*clipboard_offer)(void *user, mrs_session *session, const mrs_clip_format *formats,
+                            uint32_t count);
+    /// The client is pasting from the Mac: answer with mrs_session_clipboard_send.
+    void (*clipboard_request)(void *user, mrs_session *session, uint32_t format_id);
+    /// The client's answer to mrs_session_clipboard_fetch; NULL data means it failed.
+    void (*clipboard_data)(void *user, mrs_session *session, const uint8_t *data, size_t length);
     /// The session is gone. `session` is invalid once this returns.
     void (*session_ended)(void *user, mrs_session *session);
 } mrs_callbacks;
@@ -91,6 +109,13 @@ int mrs_session_reset_layout(mrs_session *session, uint32_t generation,
                             const mrs_monitor *monitors, uint32_t count);
 /// Queues one WebAuthn request message (a CBOR map, MS-RDPEWA 2.2.1) for the client.
 int mrs_session_webauthn_send(mrs_session *session, const uint8_t *data, size_t length);
+/// Tells the client what the Mac clipboard now holds.
+int mrs_session_clipboard_offer(mrs_session *session, const mrs_clip_format *formats,
+                                uint32_t count);
+/// Asks the client for its clipboard in `format_id`; the answer arrives as clipboard_data.
+int mrs_session_clipboard_fetch(mrs_session *session, uint32_t format_id);
+/// Answers a clipboard_request; NULL data reports failure.
+int mrs_session_clipboard_send(mrs_session *session, const uint8_t *data, size_t length);
 /// Disconnects the client.
 void mrs_session_close(mrs_session *session);
 

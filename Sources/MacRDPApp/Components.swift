@@ -16,6 +16,10 @@ struct PermissionsChecklist: View {
                           detail: "Lets your Windows keyboard and mouse control the Mac.",
                           granted: model.permissions.accessibility,
                           action: model.requestAccessibility)
+            PermissionRow(title: "Clipboard",
+                          detail: "Lets Windows paste what you copy on the Mac. Choose “Always Allow” so macOS doesn't ask each time.",
+                          granted: model.permissions.clipboard,
+                          action: model.requestClipboardAccess)
 
             if model.screenRecordingRequested && !model.permissions.screenRecording {
                 HStack(alignment: .firstTextBaseline) {

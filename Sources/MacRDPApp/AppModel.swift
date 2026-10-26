@@ -186,6 +186,12 @@ final class AppModel {
         NSWorkspace.shared.open(PrivacyPane.accessibility.url)
     }
 
+    func requestClipboardAccess() {
+        // macOS lists an app in the pane only after it has asked once.
+        DispatchQueue.global(qos: .userInitiated).async { _ = NSPasteboard.general.string(forType: .string) }
+        NSWorkspace.shared.open(PrivacyPane.clipboard.url)
+    }
+
     /// Starts a fresh copy of the app (so new permissions apply) and quits this one.
     func relaunch() {
         stopServer()
