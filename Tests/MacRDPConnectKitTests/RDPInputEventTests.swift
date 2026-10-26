@@ -1,6 +1,6 @@
 import CoreGraphics
 import Testing
-@testable import OpenConnectKit
+@testable import MacRDPConnectKit
 
 struct RDPInputEventTests {
     @Test func keyboardFlags() {

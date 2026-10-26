@@ -1,7 +1,7 @@
 import CoreMedia
 import CoreVideo
 import Foundation
-import OpenConnectKit
+import MacRDPConnectKit
 
 /// Captures one virtual display, encodes it and hands frames to the session.
 ///

@@ -1,6 +1,6 @@
-# OpenConnect
+# mac-rdp-connect
 
-Use a Windows PC as a terminal for your Mac. OpenConnect is an RDP server for macOS:
+Use a Windows PC as a terminal for your Mac. mac-rdp-connect is an RDP server for macOS:
 connect from Windows with the built-in **Remote Desktop Connection** (`mstsc`), and
 the Mac takes on the Windows PC's monitors and devices as if they were plugged in locally.
 Nothing needs installing on Windows.
@@ -8,7 +8,7 @@ Nothing needs installing on Windows.
 ## How it fits together
 
 ```
- Windows (mstsc)                                Mac (openconnect-host)
+ Windows (mstsc)                                Mac (mac-rdp-connect)
  ───────────────                                ──────────────────────
  monitor layout  ── MCS / Display Control ───▶  one CGVirtualDisplay per monitor,
                                                  same sizes, positions and DPI
@@ -18,7 +18,7 @@ Nothing needs installing on Windows.
 ```
 
 The protocol layer is [FreeRDP](https://github.com/FreeRDP/FreeRDP)'s server library
-(Apache-2.0); everything macOS-specific lives in `Sources/OpenConnectKit`.
+(Apache-2.0); everything macOS-specific lives in `Sources/MacRDPConnectKit`.
 
 ## Devices
 
@@ -58,22 +58,22 @@ On the Mac:
 
 ```sh
 ./scripts/bootstrap.sh                                         # one-time toolchain build
-./scripts/bundle.sh                                            # builds build/OpenConnect.app
-build/OpenConnect.app/Contents/MacOS/openconnect-host set-password
+./scripts/bundle.sh                                            # builds build/mac-rdp-connect.app
+build/mac-rdp-connect.app/Contents/MacOS/mac-rdp-connect set-password
 ./scripts/run.sh                                               # starts the server, follows the log
 ```
 
-The first start asks for **Screen Recording** and **Accessibility** for OpenConnect; allow both,
+The first start asks for **Screen Recording** and **Accessibility** for mac-rdp-connect; allow both,
 then start it again. Until the app is signed with a developer certificate, every rebuild makes
 macOS forget these permissions.
 
-On Windows, either double-click the file from `openconnect-host rdp-file`, or open
+On Windows, either double-click the file from `mac-rdp-connect rdp-file`, or open
 Remote Desktop Connection, enter the Mac's address, tick *Display › Use all my monitors*,
-and sign in with your Mac user name and the OpenConnect password.
+and sign in with your Mac user name and the mac-rdp-connect password.
 
 Options for `serve` / `run.sh`: `--keys windowsShortcuts` (Ctrl acts as Command),
 `--physical extend`, `--scaling native`, `--h264 baseline` (if Windows connects but stays black).
-The log is `~/Library/Logs/OpenConnect.log`; every 5 seconds it reports frames sent versus
+The log is `~/Library/Logs/mac-rdp-connect.log`; every 5 seconds it reports frames sent versus
 frames acknowledged by Windows.
 
 ## Building
@@ -89,6 +89,6 @@ swift build
 Diagnostics:
 
 ```sh
-.build/debug/openconnect-host doctor
-.build/debug/openconnect-host displays --layout 2560x1440@125,1920x1080 --seconds 10
+.build/debug/mac-rdp-connect doctor
+.build/debug/mac-rdp-connect displays --layout 2560x1440@125,1920x1080 --seconds 10
 ```

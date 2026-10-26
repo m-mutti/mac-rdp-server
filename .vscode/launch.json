@@ -5,20 +5,20 @@
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:open_connect}",
-            "name": "Debug openconnect-host",
-            "target": "openconnect-host",
+            "name": "Debug mac-rdp-connect",
+            "target": "mac-rdp-connect",
             "configuration": "debug",
-            "preLaunchTask": "swift: Build Debug openconnect-host"
+            "preLaunchTask": "swift: Build Debug mac-rdp-connect"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:open_connect}",
-            "name": "Release openconnect-host",
-            "target": "openconnect-host",
+            "name": "Release mac-rdp-connect",
+            "target": "mac-rdp-connect",
             "configuration": "release",
-            "preLaunchTask": "swift: Build Release openconnect-host"
+            "preLaunchTask": "swift: Build Release mac-rdp-connect"
         }
     ]
 }

@@ -1,5 +1,5 @@
 import Foundation
-import OpenConnectKit
+import MacRDPConnectKit
 
 /// The monitor streams of one session, reachable from FreeRDP threads
 /// (frame acknowledgements arrive there and must not wait for the main thread).
@@ -129,7 +129,7 @@ final class HostSession {
             }
         } catch {
             log("cannot capture the screen: \(error.localizedDescription)"
-                + " — allow OpenConnect under System Settings › Privacy & Security › Screen & System Audio Recording")
+                + " — allow mac-rdp-connect under System Settings › Privacy & Security › Screen & System Audio Recording")
             for stream in started { await stream.stop() }
             link.close()
             return

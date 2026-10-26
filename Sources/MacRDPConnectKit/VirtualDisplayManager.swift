@@ -45,7 +45,7 @@ public final class VirtualDisplayManager {
     }
 
     /// Vendor ID macOS uses (with product/serial) to remember arrangement per display.
-    private static let vendorID: UInt32 = 0x4F43 // "OC"
+    private static let vendorID: UInt32 = 0x4D52 // "MR"
 
     private var displays: [CGVirtualDisplay] = []
     public private(set) var monitors: [VirtualMonitor] = []
@@ -98,7 +98,7 @@ public final class VirtualDisplayManager {
     private func makeDisplay(index: Int, mode: VirtualDisplayMode, spec: MonitorSpec) throws -> CGVirtualDisplay {
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.queue = DispatchQueue.main
-        descriptor.name = "OpenConnect Display \(index + 1)"
+        descriptor.name = "mac-rdp-connect display \(index + 1)"
         descriptor.vendorID = Self.vendorID
         descriptor.productID = 1
         descriptor.serialNum = UInt32(index + 1)

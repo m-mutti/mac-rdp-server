@@ -31,7 +31,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @
     private let maxFrameRate: Int
     private let onFrame: @Sendable (Frame) -> Void
     private let onStop: @Sendable (Error?) -> Void
-    private let queue = DispatchQueue(label: "openconnect.capture", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "mac-rdp-connect.capture", qos: .userInteractive)
     private var stream: SCStream?
 
     public init(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, maxFrameRate: Int = 60,

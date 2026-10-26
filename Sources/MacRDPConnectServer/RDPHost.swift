@@ -1,6 +1,6 @@
 import CRDPServer
 import Foundation
-import OpenConnectKit
+import MacRDPConnectKit
 
 public struct HostError: Error, CustomStringConvertible {
     public let description: String
@@ -31,20 +31,20 @@ public final class RDPHost {
 
     public nonisolated static let defaultConfigDirectory = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("OpenConnect", isDirectory: true)
+        .appendingPathComponent("mac-rdp-connect", isDirectory: true)
 
     /// Creates the config directory and a TLS certificate on first use.
     public nonisolated static func prepare(directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         var error = [CChar](repeating: 0, count: 256)
-        guard oc_ensure_certificate(directory.path, &error, error.count) == 0 else { throw HostError(error) }
+        guard mrc_ensure_certificate(directory.path, &error, error.count) == 0 else { throw HostError(error) }
     }
 
     public nonisolated static func setPassword(_ password: String, user: String, directory: URL) throws {
         try prepare(directory: directory)
         var error = [CChar](repeating: 0, count: 256)
-        guard oc_write_credentials(directory.path, user, password, &error, error.count) == 0 else {
+        guard mrc_write_credentials(directory.path, user, password, &error, error.count) == 0 else {
             throw HostError(error)
         }
     }
@@ -63,7 +63,7 @@ public final class RDPHost {
     }
 
     public func start() throws {
-        var config = oc_server_config()
+        var config = mrc_server_config()
         config.port = options.port
         var callbacks = makeCallbacks()
         var error = [CChar](repeating: 0, count: 256)
@@ -72,7 +72,7 @@ public final class RDPHost {
         config.bind_address = UnsafePointer(bind)
         let started = options.configDirectory.path.withCString { path in
             config.config_dir = path
-            return oc_server_start(&config, &callbacks, &error, error.count)
+            return mrc_server_start(&config, &callbacks, &error, error.count)
         }
         guard let started else { throw HostError(error) }
         server = started
@@ -80,7 +80,7 @@ public final class RDPHost {
 
     public func stop() {
         session?.link.close()
-        oc_server_stop(server)
+        mrc_server_stop(server)
         server = nil
     }
 
@@ -144,8 +144,8 @@ public final class RDPHost {
     }
 
     // nonisolated: FreeRDP invokes these from its own threads.
-    private nonisolated func makeCallbacks() -> oc_callbacks {
-        var cb = oc_callbacks()
+    private nonisolated func makeCallbacks() -> mrc_callbacks {
+        var cb = mrc_callbacks()
         cb.user = Unmanaged.passUnretained(self).toOpaque()
         cb.session_started = { user, session, client, monitors, count in
             guard let session, let monitors else { return -1 }

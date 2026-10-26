@@ -3,7 +3,7 @@ import Foundation
 import os
 import Testing
 import VideoToolbox
-@testable import OpenConnectKit
+@testable import MacRDPConnectKit
 
 struct H264EncoderTests {
     /// 1080 is not a multiple of 16, which is the common case a remote desktop must handle.

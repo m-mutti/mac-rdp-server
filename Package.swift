@@ -5,16 +5,16 @@ import PackageDescription
 let prefix = "\(Context.packageDirectory)/third_party/prefix"
 
 let package = Package(
-    name: "OpenConnect",
+    name: "mac-rdp-connect",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "openconnect-host", targets: ["openconnect-host"]),
+        .executable(name: "mac-rdp-connect", targets: ["mac-rdp-connect"]),
     ],
     targets: [
         // Declarations for CoreGraphics' private virtual display classes.
         .target(name: "CVirtualDisplay"),
         .target(
-            name: "OpenConnectKit",
+            name: "MacRDPConnectKit",
             dependencies: ["CVirtualDisplay"],
             linkerSettings: [
                 .linkedFramework("CoreGraphics"),
@@ -48,11 +48,11 @@ let package = Package(
             ]
         ),
         .target(
-            name: "OpenConnectServer",
-            dependencies: ["OpenConnectKit", "CRDPServer"],
+            name: "MacRDPConnectServer",
+            dependencies: ["MacRDPConnectKit", "CRDPServer"],
             linkerSettings: [.linkedFramework("AppKit")]
         ),
-        .executableTarget(name: "openconnect-host", dependencies: ["OpenConnectKit", "OpenConnectServer"]),
-        .testTarget(name: "OpenConnectKitTests", dependencies: ["OpenConnectKit"]),
+        .executableTarget(name: "mac-rdp-connect", dependencies: ["MacRDPConnectKit", "MacRDPConnectServer"]),
+        .testTarget(name: "MacRDPConnectKitTests", dependencies: ["MacRDPConnectKit"]),
     ]
 )
