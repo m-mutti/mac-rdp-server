@@ -1,7 +1,7 @@
 import AppKit
 import CoreGraphics
-import MacRDPConnectKit
-import MacRDPConnectServer
+import MacRDPKit
+import MacRDPHost
 import Observation
 import UniformTypeIdentifiers
 
@@ -21,7 +21,7 @@ final class AppModel {
     }
 
     static let logFile = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/mac-rdp-connect.log")
+        .appendingPathComponent("Library/Logs/mac-rdp-server.log")
 
     private(set) var serverState = ServerState.stopped
     /// Why the last session was refused or closed, until the next one starts.
@@ -38,6 +38,11 @@ final class AppModel {
     private(set) var onboardingComplete: Bool {
         didSet { defaults.set(onboardingComplete, forKey: "onboardingComplete") }
     }
+    /// The user wants the server running (started it, or finished setup), so it
+    /// starts again after a relaunch.
+    private var serverWanted: Bool {
+        didSet { defaults.set(serverWanted, forKey: "serverWanted") }
+    }
     /// Screen Recording was requested; macOS only applies it after a relaunch.
     private(set) var screenRecordingRequested: Bool {
         didSet { defaults.set(screenRecordingRequested, forKey: "screenRecordingRequested") }
@@ -53,6 +58,7 @@ final class AppModel {
         onboardingStep = defaults.integer(forKey: "onboardingStep")
         onboardingComplete = defaults.bool(forKey: "onboardingComplete")
         screenRecordingRequested = defaults.bool(forKey: "screenRecordingRequested")
+        serverWanted = defaults.bool(forKey: "serverWanted")
     }
 
     var menuBarSymbol: String {
@@ -82,7 +88,7 @@ final class AppModel {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
         }
-        if onboardingComplete { startServer() }
+        if onboardingComplete || serverWanted { startServer() }
         switch window {
         case "settings": showSettings()
         case "onboarding": showOnboarding()
@@ -110,9 +116,16 @@ final class AppModel {
             try host.start()
             self.host = host
             serverState = .listening
+            serverWanted = true
         } catch {
             serverState = .failed("Could not start: \(error)")
         }
+    }
+
+    /// The user's Stop: the server stays off across relaunches until started again.
+    func stopServerByUser() {
+        serverWanted = false
+        stopServer()
     }
 
     func stopServer() {
@@ -188,12 +201,12 @@ final class AppModel {
     // MARK: Windows
 
     func showOnboarding() {
-        windows.show("onboarding", title: "Set Up mac-rdp-connect") { OnboardingView(model: self) }
+        windows.show("onboarding", title: "Set Up mac-rdp-server") { OnboardingView(model: self) }
     }
 
     func showSettings(_ tab: SettingsTab? = nil) {
         if let tab { settingsTab = tab }
-        windows.show("settings", title: "mac-rdp-connect Settings") { SettingsView(model: self) }
+        windows.show("settings", title: "mac-rdp-server Settings") { SettingsView(model: self) }
     }
 
     func finishOnboarding() {
@@ -216,7 +229,7 @@ final class AppModel {
     func saveRemoteDesktopFile(address: String) {
         guard let user = credentials?.user else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "mac-rdp-connect.rdp"
+        panel.nameFieldStringValue = "mac-rdp-server.rdp"
         panel.allowedContentTypes = [UTType(filenameExtension: "rdp") ?? .data]
         NSApp.activate()
         guard panel.runModal() == .OK, let url = panel.url else { return }

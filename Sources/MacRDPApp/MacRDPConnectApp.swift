@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// The menu bar app: runs the server and hosts onboarding and settings.
-public struct MacRDPConnectApp: App {
+public struct MacRDPServerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     public init() {}
@@ -32,7 +32,9 @@ public struct MacRDPConnectApp: App {
         try? FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
         freopen(log.path, "a", stdout)
         freopen(log.path, "a", stderr)
+        // A reopened stream is fully buffered; keep lines appearing as they happen.
         setvbuf(stdout, nil, _IOLBF, 0)
+        setvbuf(stderr, nil, _IOLBF, 0)
     }
 }
 

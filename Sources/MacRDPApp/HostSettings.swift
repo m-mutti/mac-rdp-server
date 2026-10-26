@@ -1,8 +1,8 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
-import MacRDPConnectKit
-import MacRDPConnectServer
+import MacRDPKit
+import MacRDPHost
 
 /// Server options the app remembers between launches.
 struct HostSettings: Equatable {

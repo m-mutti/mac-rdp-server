@@ -1,6 +1,6 @@
 import CoreGraphics
 import Testing
-@testable import MacRDPConnectKit
+@testable import MacRDPKit
 
 struct MonitorLayoutTests {
     // A laptop-style desk: secondary 1920x1080 to the LEFT of a 4K primary at 150%.

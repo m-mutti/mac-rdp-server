@@ -31,7 +31,7 @@ public enum CredentialError: LocalizedError {
 /// also kept in the login Keychain so the app can show it again.
 public enum CredentialStore {
     public static let minimumPasswordLength = 8
-    private static let keychainService = "io.github.m-mutti.mac-rdp-connect"
+    private static let keychainService = "io.github.m-mutti.mac-rdp-server"
 
     public static func hasPassword(directory: URL) -> Bool {
         FileManager.default.fileExists(atPath: samFile(in: directory).path)
@@ -50,7 +50,7 @@ public enum CredentialStore {
         guard password.count >= minimumPasswordLength else { throw CredentialError.passwordTooShort }
         try RDPHost.prepare(directory: directory)
         var error = [CChar](repeating: 0, count: 256)
-        guard mrc_write_credentials(directory.path, user, password, &error, error.count) == 0 else {
+        guard mrs_write_credentials(directory.path, user, password, &error, error.count) == 0 else {
             throw HostError(error)
         }
         // Sign-in works from users.sam alone; the Keychain copy only lets the app show it.
@@ -77,7 +77,7 @@ public enum CredentialStore {
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: keychainService,
             kSecAttrAccount: user,
-            kSecAttrLabel: "mac-rdp-connect sign-in",
+            kSecAttrLabel: "mac-rdp-server sign-in",
             kSecValueData: Data(password.utf8),
         ]
         let status = SecItemAdd(item as CFDictionary, nil)

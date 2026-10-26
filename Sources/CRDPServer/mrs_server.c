@@ -1,4 +1,4 @@
-#include "mrc_server.h"
+#include "mrs_server.h"
 
 #include <pthread.h>
 #include <stdarg.h>
@@ -31,13 +31,14 @@
 #include <freerdp/pointer.h>
 #include <freerdp/server/disp.h>
 #include <freerdp/server/rdpgfx.h>
+#include <freerdp/channels/rdpewa.h>
 #include <freerdp/settings.h>
 
-#define MRC_CERT_NAME "server"
-#define MRC_SAM_NAME "users.sam"
-#define MRC_MAX_POINTER 96
+#define MRS_CERT_NAME "server"
+#define MRS_SAM_NAME "users.sam"
+#define MRS_MAX_POINTER 96
 
-static void mrc_log(const char *fmt, ...) {
+static void mrs_log(const char *fmt, ...) {
     char stamp[16];
     const time_t now = time(NULL);
     struct tm tm;
@@ -50,7 +51,7 @@ static void mrc_log(const char *fmt, ...) {
     fputc('\n', stderr);
 }
 
-static void mrc_set_error(char *error, size_t len, const char *fmt, ...) {
+static void mrs_set_error(char *error, size_t len, const char *fmt, ...) {
     if (!error || len == 0)
         return;
     va_list ap;
@@ -59,7 +60,7 @@ static void mrc_set_error(char *error, size_t len, const char *fmt, ...) {
     va_end(ap);
 }
 
-static char *mrc_path(const char *dir, const char *name) {
+static char *mrs_path(const char *dir, const char *name) {
     const size_t len = strlen(dir) + strlen(name) + 2;
     char *path = malloc(len);
     if (path)
@@ -69,24 +70,30 @@ static char *mrc_path(const char *dir, const char *name) {
 
 // MARK: - Types
 
-typedef enum { MRC_JOB_FRAME, MRC_JOB_POINTER, MRC_JOB_RESET, MRC_JOB_CLOSE } mrc_job_kind;
+typedef enum {
+    MRS_JOB_FRAME,
+    MRS_JOB_POINTER,
+    MRS_JOB_RESET,
+    MRS_JOB_WEBAUTHN,
+    MRS_JOB_CLOSE
+} mrs_job_kind;
 
-typedef struct mrc_job {
-    struct mrc_job *next;
-    mrc_job_kind kind;
+typedef struct mrs_job {
+    struct mrs_job *next;
+    mrs_job_kind kind;
     uint32_t generation;
     uint32_t index;
     uint32_t width, height, hot_x, hot_y;
     uint32_t count;
-    mrc_monitor monitors[MRC_MAX_MONITORS];
+    mrs_monitor monitors[MRS_MAX_MONITORS];
     size_t length;
     uint8_t data[];
-} mrc_job;
+} mrs_job;
 
-struct mrc_server {
+struct mrs_server {
     freerdp_listener *listener;
     rdpSettings *settings;
-    mrc_callbacks callbacks;
+    mrs_callbacks callbacks;
     HANDLE stop_event;
     HANDLE thread;
 };
@@ -94,17 +101,22 @@ struct mrc_server {
 /// Per-connection state; FreeRDP allocates it as the peer's rdpContext.
 typedef struct {
     rdpContext base; // must be first
-    mrc_server *server;
+    mrs_server *server;
     HANDLE vcm;
     RdpgfxServerContext *gfx;
     DispServerContext *disp;
     UINT32 disp_channel_id;
+    // WebAuthn redirection (MS-RDPEWA): opened once, then answered by the client.
+    HANDLE ewa_channel;
+    HANDLE ewa_event;
+    UINT32 ewa_channel_id;
+    BOOL ewa_requested;
     BOOL activated, started, gfx_opened, gfx_ready, disp_opened, closing;
 
     // Owned by the session thread.
-    mrc_monitor monitors[MRC_MAX_MONITORS];
+    mrs_monitor monitors[MRS_MAX_MONITORS];
     uint32_t monitor_count;
-    uint16_t surface_ids[MRC_MAX_MONITORS];
+    uint16_t surface_ids[MRS_MAX_MONITORS];
     uint32_t surface_count;
     uint16_t next_surface_id;
     uint32_t generation;
@@ -115,20 +127,20 @@ typedef struct {
     // Shared with other threads, guarded by `lock`.
     BOOL lock_ready;
     pthread_mutex_t lock;
-    mrc_job *head, *tail;
+    mrs_job *head, *tail;
     uint32_t queued_frames;
     uint32_t last_frame_id;
     uint32_t last_acked_frame_id;
     BOOL acks_suspended;
     HANDLE job_event;
-} mrc_peer;
+} mrs_peer;
 
-static mrc_session *as_session(mrc_peer *p) { return (mrc_session *)p; }
-static mrc_peer *as_peer(mrc_session *s) { return (mrc_peer *)s; }
+static mrs_session *as_session(mrs_peer *p) { return (mrs_session *)p; }
+static mrs_peer *as_peer(mrs_session *s) { return (mrs_peer *)s; }
 
 // MARK: - Monitors
 
-static uint32_t mrc_scale(uint32_t value, uint32_t fallback) {
+static uint32_t mrs_scale(uint32_t value, uint32_t fallback) {
     if (value >= 100 && value <= 500)
         return value;
     if (fallback >= 100 && fallback <= 500)
@@ -136,32 +148,32 @@ static uint32_t mrc_scale(uint32_t value, uint32_t fallback) {
     return 100;
 }
 
-static uint32_t mrc_read_monitors(const rdpSettings *settings, mrc_monitor *out) {
+static uint32_t mrs_read_monitors(const rdpSettings *settings, mrs_monitor *out) {
     const uint32_t global = freerdp_settings_get_uint32(settings, FreeRDP_DesktopScaleFactor);
     const BOOL attributes = freerdp_settings_get_bool(settings, FreeRDP_HasMonitorAttributes);
     uint32_t count = freerdp_settings_get_uint32(settings, FreeRDP_MonitorCount);
     if (count == 0) {
-        out[0] = (mrc_monitor){
+        out[0] = (mrs_monitor){
             .x = 0,
             .y = 0,
             .width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
             .height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight),
             .is_primary = 1,
-            .scale_percent = mrc_scale(0, global),
+            .scale_percent = mrs_scale(0, global),
         };
         return 1;
     }
-    if (count > MRC_MAX_MONITORS)
-        count = MRC_MAX_MONITORS;
+    if (count > MRS_MAX_MONITORS)
+        count = MRS_MAX_MONITORS;
     for (uint32_t i = 0; i < count; i++) {
         const rdpMonitor *m = freerdp_settings_get_pointer_array(settings, FreeRDP_MonitorDefArray, i);
-        out[i] = (mrc_monitor){
+        out[i] = (mrs_monitor){
             .x = m->x,
             .y = m->y,
             .width = (uint32_t)m->width,
             .height = (uint32_t)m->height,
             .is_primary = m->is_primary ? 1 : 0,
-            .scale_percent = mrc_scale(attributes ? m->attributes.desktopScaleFactor : 0, global),
+            .scale_percent = mrs_scale(attributes ? m->attributes.desktopScaleFactor : 0, global),
         };
     }
     return count;
@@ -169,14 +181,14 @@ static uint32_t mrc_read_monitors(const rdpSettings *settings, mrc_monitor *out)
 
 // MARK: - Graphics pipeline
 
-static UINT32 mrc_timestamp(void) {
+static UINT32 mrs_timestamp(void) {
     SYSTEMTIME t;
     GetSystemTime(&t);
     return (UINT32)(t.wHour << 22U | t.wMinute << 16U | t.wSecond << 10U | t.wMilliseconds);
 }
 
 /// Replaces all surfaces with one per monitor, mapped where the client shows that monitor.
-static BOOL mrc_create_surfaces(mrc_peer *p) {
+static BOOL mrs_create_surfaces(mrs_peer *p) {
     RdpgfxServerContext *gfx = p->gfx;
     for (uint32_t i = 0; i < p->surface_count; i++) {
         const RDPGFX_DELETE_SURFACE_PDU del = {.surfaceId = p->surface_ids[i]};
@@ -185,9 +197,9 @@ static BOOL mrc_create_surfaces(mrc_peer *p) {
     p->surface_count = 0;
 
     int32_t min_x = INT32_MAX, min_y = INT32_MAX, max_x = INT32_MIN, max_y = INT32_MIN;
-    MONITOR_DEF defs[MRC_MAX_MONITORS];
+    MONITOR_DEF defs[MRS_MAX_MONITORS];
     for (uint32_t i = 0; i < p->monitor_count; i++) {
-        const mrc_monitor *m = &p->monitors[i];
+        const mrs_monitor *m = &p->monitors[i];
         defs[i] = (MONITOR_DEF){
             .left = m->x,
             .top = m->y,
@@ -208,12 +220,12 @@ static BOOL mrc_create_surfaces(mrc_peer *p) {
         .monitorDefArray = defs,
     };
     if (gfx->ResetGraphics(gfx, &reset) != CHANNEL_RC_OK) {
-        mrc_log("ResetGraphics failed");
+        mrs_log("ResetGraphics failed");
         return FALSE;
     }
 
     for (uint32_t i = 0; i < p->monitor_count; i++) {
-        const mrc_monitor *m = &p->monitors[i];
+        const mrs_monitor *m = &p->monitors[i];
         if (p->next_surface_id == 0)
             p->next_surface_id = 1;
         const uint16_t id = p->next_surface_id++;
@@ -231,17 +243,17 @@ static BOOL mrc_create_surfaces(mrc_peer *p) {
         };
         if (gfx->CreateSurface(gfx, &create) != CHANNEL_RC_OK ||
             gfx->MapSurfaceToOutput(gfx, &map) != CHANNEL_RC_OK) {
-            mrc_log("creating surface for monitor %u failed", i + 1);
+            mrs_log("creating surface for monitor %u failed", i + 1);
             return FALSE;
         }
         p->surface_ids[i] = id;
         p->surface_count++;
     }
-    mrc_log("desktop %ux%u across %u monitor(s)", reset.width, reset.height, p->monitor_count);
+    mrs_log("desktop %ux%u across %u monitor(s)", reset.width, reset.height, p->monitor_count);
     return TRUE;
 }
 
-static BOOL mrc_caps_allow_avc420(const RDPGFX_CAPSET *caps) {
+static BOOL mrs_caps_allow_avc420(const RDPGFX_CAPSET *caps) {
     switch (caps->version) {
     case RDPGFX_CAPVERSION_8:
         return FALSE;
@@ -252,8 +264,8 @@ static BOOL mrc_caps_allow_avc420(const RDPGFX_CAPSET *caps) {
     }
 }
 
-static UINT mrc_gfx_caps_advertise(RdpgfxServerContext *gfx, const RDPGFX_CAPS_ADVERTISE_PDU *pdu) {
-    mrc_peer *p = gfx->custom;
+static UINT mrs_gfx_caps_advertise(RdpgfxServerContext *gfx, const RDPGFX_CAPS_ADVERTISE_PDU *pdu) {
+    mrs_peer *p = gfx->custom;
     static const UINT32 preferred[] = {
         RDPGFX_CAPVERSION_107, RDPGFX_CAPVERSION_106, RDPGFX_CAPVERSION_106_ERR,
         RDPGFX_CAPVERSION_105, RDPGFX_CAPVERSION_104, RDPGFX_CAPVERSION_103,
@@ -263,7 +275,7 @@ static UINT mrc_gfx_caps_advertise(RdpgfxServerContext *gfx, const RDPGFX_CAPS_A
     for (size_t v = 0; v < ARRAYSIZE(preferred); v++) {
         for (UINT16 i = 0; i < pdu->capsSetCount; i++) {
             const RDPGFX_CAPSET *offered = &pdu->capsSets[i];
-            if (offered->version != preferred[v] || !mrc_caps_allow_avc420(offered))
+            if (offered->version != preferred[v] || !mrs_caps_allow_avc420(offered))
                 continue;
 
             RDPGFX_CAPSET caps = *offered;
@@ -271,21 +283,21 @@ static UINT mrc_gfx_caps_advertise(RdpgfxServerContext *gfx, const RDPGFX_CAPS_A
             const UINT rc = gfx->CapsConfirm(gfx, &confirm);
             if (rc != CHANNEL_RC_OK)
                 return rc;
-            mrc_log("graphics pipeline 0x%08x with H.264", caps.version);
+            mrs_log("graphics pipeline 0x%08x with H.264", caps.version);
             p->gfx_ready = TRUE;
-            if (!mrc_create_surfaces(p))
+            if (!mrs_create_surfaces(p))
                 return ERROR_INTERNAL_ERROR;
             p->server->callbacks.graphics_ready(p->server->callbacks.user, as_session(p));
             return CHANNEL_RC_OK;
         }
     }
-    mrc_log("client cannot decode H.264 (AVC420); disconnecting");
+    mrs_log("client cannot decode H.264 (AVC420); disconnecting");
     p->closing = TRUE;
     return CHANNEL_RC_OK;
 }
 
-static UINT mrc_gfx_frame_ack(RdpgfxServerContext *gfx, const RDPGFX_FRAME_ACKNOWLEDGE_PDU *ack) {
-    mrc_peer *p = gfx->custom;
+static UINT mrs_gfx_frame_ack(RdpgfxServerContext *gfx, const RDPGFX_FRAME_ACKNOWLEDGE_PDU *ack) {
+    mrs_peer *p = gfx->custom;
     pthread_mutex_lock(&p->lock);
     p->last_acked_frame_id = ack->frameId;
     p->acks_suspended = ack->queueDepth == SUSPEND_FRAME_ACKNOWLEDGEMENT;
@@ -295,10 +307,10 @@ static UINT mrc_gfx_frame_ack(RdpgfxServerContext *gfx, const RDPGFX_FRAME_ACKNO
     return CHANNEL_RC_OK;
 }
 
-static void mrc_send_frame(mrc_peer *p, const mrc_job *job) {
+static void mrs_send_frame(mrs_peer *p, const mrs_job *job) {
     if (!p->gfx_ready || job->generation != p->generation || job->index >= p->surface_count)
         return;
-    const mrc_monitor *m = &p->monitors[job->index];
+    const mrs_monitor *m = &p->monitors[job->index];
 
     RECTANGLE_16 rect = {.left = 0, .top = 0, .right = (UINT16)m->width, .bottom = (UINT16)m->height};
     RDPGFX_H264_QUANT_QUALITY quality = {.qp = 22, .r = 0, .p = 0, .qualityVal = 100};
@@ -322,10 +334,10 @@ static void mrc_send_frame(mrc_peer *p, const mrc_job *job) {
     const UINT32 frame_id = ++p->last_frame_id;
     pthread_mutex_unlock(&p->lock);
 
-    const RDPGFX_START_FRAME_PDU start = {.timestamp = mrc_timestamp(), .frameId = frame_id};
+    const RDPGFX_START_FRAME_PDU start = {.timestamp = mrs_timestamp(), .frameId = frame_id};
     const RDPGFX_END_FRAME_PDU end = {.frameId = frame_id};
     if (p->gfx->SurfaceFrameCommand(p->gfx, &cmd, &start, &end) != CHANNEL_RC_OK) {
-        mrc_log("sending frame failed; disconnecting");
+        mrs_log("sending frame failed; disconnecting");
         p->closing = TRUE;
         return;
     }
@@ -333,7 +345,7 @@ static void mrc_send_frame(mrc_peer *p, const mrc_job *job) {
     p->stat_bytes += job->length;
 }
 
-static void mrc_report_stats(mrc_peer *p) {
+static void mrs_report_stats(mrs_peer *p) {
     const uint64_t now = GetTickCount64();
     if (p->stat_since == 0)
         p->stat_since = now;
@@ -341,9 +353,9 @@ static void mrc_report_stats(mrc_peer *p) {
     if (elapsed < 5000 || (p->stat_frames == 0 && p->stat_acks == 0))
         return;
     // Frames sent but never acknowledged mean the client cannot decode them.
-    mrc_log("video: %.1f fps sent, %.1f fps acknowledged, %.1f Mbit/s, %u in flight",
+    mrs_log("video: %.1f fps sent, %.1f fps acknowledged, %.1f Mbit/s, %u in flight",
            p->stat_frames * 1000.0 / elapsed, p->stat_acks * 1000.0 / elapsed,
-           p->stat_bytes * 8.0 / 1000.0 / elapsed, mrc_session_frames_in_flight(as_session(p)));
+           p->stat_bytes * 8.0 / 1000.0 / elapsed, mrs_session_frames_in_flight(as_session(p)));
     p->stat_frames = p->stat_acks = 0;
     p->stat_bytes = 0;
     p->stat_since = now;
@@ -351,7 +363,7 @@ static void mrc_report_stats(mrc_peer *p) {
 
 // MARK: - Pointer
 
-static void mrc_send_pointer(mrc_peer *p, const mrc_job *job) {
+static void mrs_send_pointer(mrs_peer *p, const mrs_job *job) {
     rdpPointerUpdate *pointer = p->base.update->pointer;
     if (!p->activated)
         return;
@@ -402,7 +414,7 @@ out:
 
 // MARK: - Job queue
 
-static int mrc_enqueue(mrc_peer *p, mrc_job *job) {
+static int mrs_enqueue(mrs_peer *p, mrs_job *job) {
     job->next = NULL;
     pthread_mutex_lock(&p->lock);
     if (p->tail)
@@ -410,41 +422,51 @@ static int mrc_enqueue(mrc_peer *p, mrc_job *job) {
     else
         p->head = job;
     p->tail = job;
-    if (job->kind == MRC_JOB_FRAME)
+    if (job->kind == MRS_JOB_FRAME)
         p->queued_frames++;
     pthread_mutex_unlock(&p->lock);
     SetEvent(p->job_event);
     return 0;
 }
 
-static void mrc_run_jobs(mrc_peer *p) {
+static void mrs_send_webauthn(mrs_peer *p, const mrs_job *job) {
+    ULONG written = 0;
+    if (!p->ewa_channel ||
+        !WTSVirtualChannelWrite(p->ewa_channel, (PCHAR)job->data, (ULONG)job->length, &written))
+        mrs_log("could not send a WebAuthn request");
+}
+
+static void mrs_run_jobs(mrs_peer *p) {
     pthread_mutex_lock(&p->lock);
-    mrc_job *job = p->head;
+    mrs_job *job = p->head;
     p->head = p->tail = NULL;
     ResetEvent(p->job_event);
     pthread_mutex_unlock(&p->lock);
 
     while (job) {
-        mrc_job *next = job->next;
+        mrs_job *next = job->next;
         switch (job->kind) {
-        case MRC_JOB_FRAME:
+        case MRS_JOB_FRAME:
             if (!p->closing)
-                mrc_send_frame(p, job);
+                mrs_send_frame(p, job);
             pthread_mutex_lock(&p->lock);
             p->queued_frames--;
             pthread_mutex_unlock(&p->lock);
             break;
-        case MRC_JOB_POINTER:
-            mrc_send_pointer(p, job);
+        case MRS_JOB_POINTER:
+            mrs_send_pointer(p, job);
             break;
-        case MRC_JOB_RESET:
-            memcpy(p->monitors, job->monitors, sizeof(mrc_monitor) * job->count);
+        case MRS_JOB_RESET:
+            memcpy(p->monitors, job->monitors, sizeof(mrs_monitor) * job->count);
             p->monitor_count = job->count;
             p->generation = job->generation;
-            if (p->gfx_ready && !mrc_create_surfaces(p))
+            if (p->gfx_ready && !mrs_create_surfaces(p))
                 p->closing = TRUE;
             break;
-        case MRC_JOB_CLOSE:
+        case MRS_JOB_WEBAUTHN:
+            mrs_send_webauthn(p, job);
+            break;
+        case MRS_JOB_CLOSE:
             p->closing = TRUE;
             break;
         }
@@ -453,8 +475,8 @@ static void mrc_run_jobs(mrc_peer *p) {
     }
 }
 
-static mrc_job *mrc_job_new(mrc_job_kind kind, size_t length) {
-    mrc_job *job = calloc(1, sizeof(mrc_job) + length);
+static mrs_job *mrs_job_new(mrs_job_kind kind, size_t length) {
+    mrs_job *job = calloc(1, sizeof(mrs_job) + length);
     if (job) {
         job->kind = kind;
         job->length = length;
@@ -462,19 +484,19 @@ static mrc_job *mrc_job_new(mrc_job_kind kind, size_t length) {
     return job;
 }
 
-int mrc_session_send_h264(mrc_session *session, uint32_t generation, uint32_t index,
+int mrs_session_send_h264(mrs_session *session, uint32_t generation, uint32_t index,
                          const uint8_t *data, size_t length) {
-    mrc_job *job = mrc_job_new(MRC_JOB_FRAME, length);
+    mrs_job *job = mrs_job_new(MRS_JOB_FRAME, length);
     if (!job)
         return -1;
     job->generation = generation;
     job->index = index;
     memcpy(job->data, data, length);
-    return mrc_enqueue(as_peer(session), job);
+    return mrs_enqueue(as_peer(session), job);
 }
 
-uint32_t mrc_session_frames_in_flight(mrc_session *session) {
-    mrc_peer *p = as_peer(session);
+uint32_t mrs_session_frames_in_flight(mrs_session *session) {
+    mrs_peer *p = as_peer(session);
     pthread_mutex_lock(&p->lock);
     uint32_t n = p->queued_frames;
     if (!p->acks_suspended)
@@ -483,12 +505,12 @@ uint32_t mrc_session_frames_in_flight(mrc_session *session) {
     return n;
 }
 
-int mrc_session_set_pointer(mrc_session *session, const uint8_t *bgra, uint32_t width,
+int mrs_session_set_pointer(mrs_session *session, const uint8_t *bgra, uint32_t width,
                            uint32_t height, uint32_t hot_x, uint32_t hot_y) {
-    if (bgra && (width == 0 || height == 0 || width > MRC_MAX_POINTER || height > MRC_MAX_POINTER))
+    if (bgra && (width == 0 || height == 0 || width > MRS_MAX_POINTER || height > MRS_MAX_POINTER))
         return -1;
     const size_t length = bgra ? (size_t)width * height * 4 : 0;
-    mrc_job *job = mrc_job_new(MRC_JOB_POINTER, length);
+    mrs_job *job = mrs_job_new(MRS_JOB_POINTER, length);
     if (!job)
         return -1;
     job->width = width;
@@ -497,58 +519,113 @@ int mrc_session_set_pointer(mrc_session *session, const uint8_t *bgra, uint32_t 
     job->hot_y = hot_y < height ? hot_y : 0;
     if (bgra)
         memcpy(job->data, bgra, length);
-    return mrc_enqueue(as_peer(session), job);
+    return mrs_enqueue(as_peer(session), job);
 }
 
-int mrc_session_reset_layout(mrc_session *session, uint32_t generation, const mrc_monitor *monitors,
+int mrs_session_reset_layout(mrs_session *session, uint32_t generation, const mrs_monitor *monitors,
                             uint32_t count) {
-    if (count == 0 || count > MRC_MAX_MONITORS)
+    if (count == 0 || count > MRS_MAX_MONITORS)
         return -1;
-    mrc_job *job = mrc_job_new(MRC_JOB_RESET, 0);
+    mrs_job *job = mrs_job_new(MRS_JOB_RESET, 0);
     if (!job)
         return -1;
     job->generation = generation;
     job->count = count;
-    memcpy(job->monitors, monitors, sizeof(mrc_monitor) * count);
-    return mrc_enqueue(as_peer(session), job);
+    memcpy(job->monitors, monitors, sizeof(mrs_monitor) * count);
+    return mrs_enqueue(as_peer(session), job);
 }
 
-void mrc_session_close(mrc_session *session) {
-    mrc_job *job = mrc_job_new(MRC_JOB_CLOSE, 0);
+int mrs_session_webauthn_send(mrs_session *session, const uint8_t *data, size_t length) {
+    mrs_job *job = mrs_job_new(MRS_JOB_WEBAUTHN, length);
+    if (!job)
+        return -1;
+    memcpy(job->data, data, length);
+    return mrs_enqueue(as_peer(session), job);
+}
+
+void mrs_session_close(mrs_session *session) {
+    mrs_job *job = mrs_job_new(MRS_JOB_CLOSE, 0);
     if (job)
-        mrc_enqueue(as_peer(session), job);
+        mrs_enqueue(as_peer(session), job);
 }
 
 // MARK: - Display control (live re-layout)
 
-static BOOL mrc_disp_channel_assigned(DispServerContext *disp, UINT32 channel_id) {
-    ((mrc_peer *)disp->custom)->disp_channel_id = channel_id;
+static BOOL mrs_disp_channel_assigned(DispServerContext *disp, UINT32 channel_id) {
+    ((mrs_peer *)disp->custom)->disp_channel_id = channel_id;
     return TRUE;
 }
 
-static BOOL mrc_dvc_created(void *userdata, UINT32 channel_id, INT32 status) {
-    mrc_peer *p = userdata;
+static BOOL mrs_dvc_created(void *userdata, UINT32 channel_id, INT32 status) {
+    mrs_peer *p = userdata;
     // Capabilities can only go out once the client has accepted the channel.
     if (p->disp && channel_id == p->disp_channel_id && status >= 0)
         (void)p->disp->DisplayControlCaps(p->disp);
+    if (p->ewa_channel && channel_id == p->ewa_channel_id) {
+        // Clients refuse the channel when WebAuthn redirection is off or unsupported.
+        mrs_log("WebAuthn redirection %s by the client", status >= 0 ? "accepted" : "refused");
+        p->server->callbacks.webauthn_available(p->server->callbacks.user, as_session(p),
+                                                status >= 0);
+    }
     return TRUE;
 }
 
-static UINT mrc_disp_layout(DispServerContext *disp, const DISPLAY_CONTROL_MONITOR_LAYOUT_PDU *pdu) {
-    mrc_peer *p = disp->custom;
-    mrc_monitor monitors[MRC_MAX_MONITORS];
-    const uint32_t count = pdu->NumMonitors < MRC_MAX_MONITORS ? pdu->NumMonitors : MRC_MAX_MONITORS;
+// MARK: - WebAuthn redirection
+
+static void mrs_open_webauthn(mrs_peer *p) {
+    DWORD session_id = WTS_CURRENT_SESSION;
+    PULONG queried = NULL;
+    DWORD bytes = 0;
+    if (WTSQuerySessionInformationA(p->vcm, WTS_CURRENT_SESSION, WTSSessionId, (LPSTR *)&queried,
+                                    &bytes) &&
+        queried) {
+        session_id = *queried;
+        WTSFreeMemory(queried);
+    }
+    p->ewa_channel = WTSVirtualChannelOpenEx(session_id, RDPEWA_DVC_CHANNEL_NAME,
+                                             WTS_CHANNEL_OPTION_DYNAMIC);
+    if (!p->ewa_channel) {
+        p->server->callbacks.webauthn_available(p->server->callbacks.user, as_session(p), 0);
+        return;
+    }
+    p->ewa_channel_id = WTSChannelGetIdByHandle(p->ewa_channel);
+    void *buffer = NULL;
+    if (WTSVirtualChannelQuery(p->ewa_channel, WTSVirtualEventHandle, &buffer, &bytes) &&
+        bytes == sizeof(HANDLE))
+        p->ewa_event = *(HANDLE *)buffer;
+    WTSFreeMemory(buffer);
+}
+
+/// Hands every complete WebAuthn message the client sent to the host.
+static void mrs_read_webauthn(mrs_peer *p) {
+    ULONG size = 0;
+    while (WTSVirtualChannelRead(p->ewa_channel, 0, NULL, 0, &size) && size > 0) {
+        BYTE *message = malloc(size);
+        ULONG read = 0;
+        if (!message)
+            return;
+        if (WTSVirtualChannelRead(p->ewa_channel, 0, (PCHAR)message, size, &read) && read > 0)
+            p->server->callbacks.webauthn_response(p->server->callbacks.user, as_session(p),
+                                                   message, read);
+        free(message);
+    }
+}
+
+static UINT mrs_disp_layout(DispServerContext *disp, const DISPLAY_CONTROL_MONITOR_LAYOUT_PDU *pdu) {
+    mrs_peer *p = disp->custom;
+    mrs_monitor monitors[MRS_MAX_MONITORS];
+    const uint32_t count = pdu->NumMonitors < MRS_MAX_MONITORS ? pdu->NumMonitors : MRS_MAX_MONITORS;
     if (count == 0)
         return CHANNEL_RC_OK;
     for (uint32_t i = 0; i < count; i++) {
         const DISPLAY_CONTROL_MONITOR_LAYOUT *m = &pdu->Monitors[i];
-        monitors[i] = (mrc_monitor){
+        monitors[i] = (mrs_monitor){
             .x = m->Left,
             .y = m->Top,
             .width = m->Width,
             .height = m->Height,
             .is_primary = (m->Flags & DISPLAY_CONTROL_MONITOR_PRIMARY) ? 1 : 0,
-            .scale_percent = mrc_scale(m->DesktopScaleFactor, 100),
+            .scale_percent = mrs_scale(m->DesktopScaleFactor, 100),
         };
     }
     p->server->callbacks.layout_requested(p->server->callbacks.user, as_session(p), monitors, count);
@@ -557,48 +634,48 @@ static UINT mrc_disp_layout(DispServerContext *disp, const DISPLAY_CONTROL_MONIT
 
 // MARK: - Input
 
-static BOOL mrc_on_keyboard(rdpInput *input, UINT16 flags, UINT8 code) {
-    mrc_peer *p = (mrc_peer *)input->context;
+static BOOL mrs_on_keyboard(rdpInput *input, UINT16 flags, UINT8 code) {
+    mrs_peer *p = (mrs_peer *)input->context;
     p->server->callbacks.keyboard(p->server->callbacks.user, as_session(p), flags, code);
     return TRUE;
 }
 
-static BOOL mrc_on_unicode(rdpInput *input, UINT16 flags, UINT16 code) {
-    mrc_peer *p = (mrc_peer *)input->context;
+static BOOL mrs_on_unicode(rdpInput *input, UINT16 flags, UINT16 code) {
+    mrs_peer *p = (mrs_peer *)input->context;
     p->server->callbacks.unicode(p->server->callbacks.user, as_session(p), flags, code);
     return TRUE;
 }
 
-static BOOL mrc_on_mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
-    mrc_peer *p = (mrc_peer *)input->context;
+static BOOL mrs_on_mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
+    mrs_peer *p = (mrs_peer *)input->context;
     p->server->callbacks.mouse(p->server->callbacks.user, as_session(p), flags, x, y);
     return TRUE;
 }
 
-static BOOL mrc_on_extended_mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
-    mrc_peer *p = (mrc_peer *)input->context;
+static BOOL mrs_on_extended_mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
+    mrs_peer *p = (mrs_peer *)input->context;
     p->server->callbacks.extended_mouse(p->server->callbacks.user, as_session(p), flags, x, y);
     return TRUE;
 }
 
-static BOOL mrc_on_synchronize(rdpInput *input, UINT32 flags) {
+static BOOL mrs_on_synchronize(rdpInput *input, UINT32 flags) {
     WINPR_UNUSED(input);
     WINPR_UNUSED(flags);
     return TRUE;
 }
 
-static BOOL mrc_on_focus_in(rdpInput *input, UINT16 toggle_states) {
+static BOOL mrs_on_focus_in(rdpInput *input, UINT16 toggle_states) {
     WINPR_UNUSED(input);
     WINPR_UNUSED(toggle_states);
     return TRUE;
 }
 
-static BOOL mrc_on_pause(rdpInput *input) {
+static BOOL mrs_on_pause(rdpInput *input) {
     WINPR_UNUSED(input);
     return TRUE;
 }
 
-static BOOL mrc_on_rel_mouse(rdpInput *input, UINT16 flags, INT16 dx, INT16 dy) {
+static BOOL mrs_on_rel_mouse(rdpInput *input, UINT16 flags, INT16 dx, INT16 dy) {
     WINPR_UNUSED(input);
     WINPR_UNUSED(flags);
     WINPR_UNUSED(dx);
@@ -606,18 +683,18 @@ static BOOL mrc_on_rel_mouse(rdpInput *input, UINT16 flags, INT16 dx, INT16 dy) 
     return TRUE;
 }
 
-static BOOL mrc_refresh_rect(rdpContext *context, BYTE count, const RECTANGLE_16 *areas) {
+static BOOL mrs_refresh_rect(rdpContext *context, BYTE count, const RECTANGLE_16 *areas) {
     WINPR_UNUSED(count);
     WINPR_UNUSED(areas);
-    mrc_peer *p = (mrc_peer *)context;
+    mrs_peer *p = (mrs_peer *)context;
     if (p->started)
         p->server->callbacks.refresh_requested(p->server->callbacks.user, as_session(p));
     return TRUE;
 }
 
-static BOOL mrc_suppress_output(rdpContext *context, BYTE allow, const RECTANGLE_16 *area) {
+static BOOL mrs_suppress_output(rdpContext *context, BYTE allow, const RECTANGLE_16 *area) {
     WINPR_UNUSED(area);
-    mrc_peer *p = (mrc_peer *)context;
+    mrs_peer *p = (mrs_peer *)context;
     // Coming back from minimized: the client discarded its picture.
     if (allow && p->started)
         p->server->callbacks.refresh_requested(p->server->callbacks.user, as_session(p));
@@ -626,8 +703,8 @@ static BOOL mrc_suppress_output(rdpContext *context, BYTE allow, const RECTANGLE
 
 // MARK: - Session lifecycle
 
-static BOOL mrc_peer_context_new(freerdp_peer *client, rdpContext *context) {
-    mrc_peer *p = (mrc_peer *)context;
+static BOOL mrs_peer_context_new(freerdp_peer *client, rdpContext *context) {
+    mrs_peer *p = (mrs_peer *)context;
     p->server = client->ContextExtra;
     p->next_surface_id = 1;
     p->vcm = WTSOpenServerA((LPSTR)context);
@@ -640,17 +717,17 @@ static BOOL mrc_peer_context_new(freerdp_peer *client, rdpContext *context) {
     return p->job_event != NULL;
 }
 
-static void mrc_peer_context_free(freerdp_peer *client, rdpContext *context) {
+static void mrs_peer_context_free(freerdp_peer *client, rdpContext *context) {
     WINPR_UNUSED(client);
-    mrc_peer *p = (mrc_peer *)context;
+    mrs_peer *p = (mrs_peer *)context;
     if (!p)
         return;
     if (p->gfx)
         rdpgfx_server_context_free(p->gfx);
     if (p->disp)
         disp_server_context_free(p->disp);
-    for (mrc_job *job = p->head; job;) {
-        mrc_job *next = job->next;
+    for (mrs_job *job = p->head; job;) {
+        mrs_job *next = job->next;
         free(job);
         job = next;
     }
@@ -662,23 +739,23 @@ static void mrc_peer_context_free(freerdp_peer *client, rdpContext *context) {
         WTSCloseServer(p->vcm);
 }
 
-static BOOL mrc_post_connect(freerdp_peer *client) {
-    mrc_peer *p = (mrc_peer *)client->context;
+static BOOL mrs_post_connect(freerdp_peer *client) {
+    mrs_peer *p = (mrs_peer *)client->context;
     rdpSettings *settings = client->context->settings;
 
     if (!freerdp_settings_get_bool(settings, FreeRDP_SupportGraphicsPipeline)) {
-        mrc_log("%s: client does not support the graphics pipeline", client->hostname);
+        mrs_log("%s: client does not support the graphics pipeline", client->hostname);
         return FALSE;
     }
 
-    p->monitor_count = mrc_read_monitors(settings, p->monitors);
-    mrc_log("%s signed in as %s, %u monitor(s)", client->hostname,
+    p->monitor_count = mrs_read_monitors(settings, p->monitors);
+    mrs_log("%s signed in as %s, %u monitor(s)", client->hostname,
            freerdp_settings_get_string(settings, FreeRDP_Username), p->monitor_count);
 
-    const mrc_callbacks *cb = &p->server->callbacks;
+    const mrs_callbacks *cb = &p->server->callbacks;
     if (cb->session_started(cb->user, as_session(p), client->hostname, p->monitors,
                             p->monitor_count) != 0) {
-        mrc_log("%s: session refused", client->hostname);
+        mrs_log("%s: session refused", client->hostname);
         return FALSE;
     }
     p->started = TRUE;
@@ -688,8 +765,8 @@ static BOOL mrc_post_connect(freerdp_peer *client) {
         return FALSE;
     p->gfx->rdpcontext = client->context;
     p->gfx->custom = p;
-    p->gfx->CapsAdvertise = mrc_gfx_caps_advertise;
-    p->gfx->FrameAcknowledge = mrc_gfx_frame_ack;
+    p->gfx->CapsAdvertise = mrs_gfx_caps_advertise;
+    p->gfx->FrameAcknowledge = mrs_gfx_frame_ack;
     if (!p->gfx->Initialize(p->gfx, TRUE))
         return FALSE;
 
@@ -697,24 +774,24 @@ static BOOL mrc_post_connect(freerdp_peer *client) {
     if (p->disp) {
         p->disp->rdpcontext = client->context;
         p->disp->custom = p;
-        p->disp->MaxNumMonitors = MRC_MAX_MONITORS;
+        p->disp->MaxNumMonitors = MRS_MAX_MONITORS;
         p->disp->MaxMonitorAreaFactorA = 8192;
         p->disp->MaxMonitorAreaFactorB = 8192;
-        p->disp->DispMonitorLayout = mrc_disp_layout;
-        p->disp->ChannelIdAssigned = mrc_disp_channel_assigned;
-        WTSVirtualChannelManagerSetDVCCreationCallback(p->vcm, mrc_dvc_created, p);
+        p->disp->DispMonitorLayout = mrs_disp_layout;
+        p->disp->ChannelIdAssigned = mrs_disp_channel_assigned;
     }
+    WTSVirtualChannelManagerSetDVCCreationCallback(p->vcm, mrs_dvc_created, p);
     return TRUE;
 }
 
-static BOOL mrc_activate(freerdp_peer *client) {
-    ((mrc_peer *)client->context)->activated = TRUE;
+static BOOL mrs_activate(freerdp_peer *client) {
+    ((mrs_peer *)client->context)->activated = TRUE;
     return TRUE;
 }
 
 /// Dynamic channels (graphics, display control) can only open once the client
 /// finished activation and its drdynvc channel is up.
-static BOOL mrc_open_dynamic_channels(mrc_peer *p) {
+static BOOL mrs_open_dynamic_channels(mrs_peer *p) {
     if (!p->activated || !WTSVirtualChannelManagerIsChannelJoined(p->vcm, DRDYNVC_SVC_CHANNEL_NAME))
         return TRUE;
     switch (WTSVirtualChannelManagerGetDrdynvcState(p->vcm)) {
@@ -723,7 +800,7 @@ static BOOL mrc_open_dynamic_channels(mrc_peer *p) {
     case DRDYNVC_STATE_READY:
         if (p->gfx && !p->gfx_opened) {
             if (!p->gfx->Open(p->gfx)) {
-                mrc_log("could not open the graphics channel");
+                mrs_log("could not open the graphics channel");
                 return FALSE;
             }
             p->gfx_opened = TRUE;
@@ -731,7 +808,11 @@ static BOOL mrc_open_dynamic_channels(mrc_peer *p) {
         if (p->disp && !p->disp_opened) {
             p->disp_opened = p->disp->Open(p->disp) == CHANNEL_RC_OK;
             if (!p->disp_opened)
-                mrc_log("display control unavailable; window resizing will not adapt");
+                mrs_log("display control unavailable; window resizing will not adapt");
+        }
+        if (!p->ewa_requested) {
+            p->ewa_requested = TRUE;
+            mrs_open_webauthn(p);
         }
         return TRUE;
     default:
@@ -739,32 +820,32 @@ static BOOL mrc_open_dynamic_channels(mrc_peer *p) {
     }
 }
 
-static DWORD WINAPI mrc_session_thread(LPVOID arg) {
+static DWORD WINAPI mrs_session_thread(LPVOID arg) {
     freerdp_peer *client = arg;
-    mrc_peer *p = (mrc_peer *)client->context;
-    mrc_server *server = p->server;
+    mrs_peer *p = (mrs_peer *)client->context;
+    mrs_server *server = p->server;
 
-    client->PostConnect = mrc_post_connect;
-    client->Activate = mrc_activate;
+    client->PostConnect = mrs_post_connect;
+    client->Activate = mrs_activate;
     rdpInput *input = client->context->input;
-    input->KeyboardEvent = mrc_on_keyboard;
-    input->UnicodeKeyboardEvent = mrc_on_unicode;
-    input->MouseEvent = mrc_on_mouse;
-    input->ExtendedMouseEvent = mrc_on_extended_mouse;
-    input->SynchronizeEvent = mrc_on_synchronize;
-    input->FocusInEvent = mrc_on_focus_in;
-    input->KeyboardPauseEvent = mrc_on_pause;
-    input->RelMouseEvent = mrc_on_rel_mouse;
+    input->KeyboardEvent = mrs_on_keyboard;
+    input->UnicodeKeyboardEvent = mrs_on_unicode;
+    input->MouseEvent = mrs_on_mouse;
+    input->ExtendedMouseEvent = mrs_on_extended_mouse;
+    input->SynchronizeEvent = mrs_on_synchronize;
+    input->FocusInEvent = mrs_on_focus_in;
+    input->KeyboardPauseEvent = mrs_on_pause;
+    input->RelMouseEvent = mrs_on_rel_mouse;
 
     if (!client->Initialize(client))
         goto out;
-    client->context->update->RefreshRect = mrc_refresh_rect;
-    client->context->update->SuppressOutput = mrc_suppress_output;
+    client->context->update->RefreshRect = mrs_refresh_rect;
+    client->context->update->SuppressOutput = mrs_suppress_output;
 
     const HANDLE channel_event = WTSVirtualChannelManagerGetEventHandle(p->vcm);
     while (!p->closing) {
         HANDLE events[MAXIMUM_WAIT_OBJECTS];
-        DWORD count = client->GetEventHandles(client, events, MAXIMUM_WAIT_OBJECTS - 4);
+        DWORD count = client->GetEventHandles(client, events, MAXIMUM_WAIT_OBJECTS - 5);
         if (count == 0)
             break;
         events[count++] = channel_event;
@@ -773,6 +854,8 @@ static DWORD WINAPI mrc_session_thread(LPVOID arg) {
         const HANDLE gfx_event = p->gfx_opened ? rdpgfx_server_get_event_handle(p->gfx) : NULL;
         if (gfx_event)
             events[count++] = gfx_event;
+        if (p->ewa_event)
+            events[count++] = p->ewa_event;
 
         if (WaitForMultipleObjects(count, events, FALSE, INFINITE) == WAIT_FAILED)
             break;
@@ -780,7 +863,7 @@ static DWORD WINAPI mrc_session_thread(LPVOID arg) {
             break;
         if (!client->CheckFileDescriptor(client))
             break;
-        if (!mrc_open_dynamic_channels(p))
+        if (!mrs_open_dynamic_channels(p))
             break;
         if (WaitForSingleObject(channel_event, 0) == WAIT_OBJECT_0 &&
             !WTSVirtualChannelManagerCheckFileDescriptor(p->vcm))
@@ -788,16 +871,20 @@ static DWORD WINAPI mrc_session_thread(LPVOID arg) {
         if (gfx_event && WaitForSingleObject(gfx_event, 0) == WAIT_OBJECT_0 &&
             rdpgfx_server_handle_messages(p->gfx) != CHANNEL_RC_OK)
             break;
-        mrc_run_jobs(p);
-        mrc_report_stats(p);
+        if (p->ewa_event && WaitForSingleObject(p->ewa_event, 0) == WAIT_OBJECT_0)
+            mrs_read_webauthn(p);
+        mrs_run_jobs(p);
+        mrs_report_stats(p);
     }
-    mrc_log("%s disconnected", client->hostname);
+    mrs_log("%s disconnected", client->hostname);
 
     // Stop channel threads before telling the host, so no callback outlives the session.
     if (p->disp_opened)
         (void)p->disp->Close(p->disp);
     if (p->gfx_opened)
         (void)p->gfx->Close(p->gfx);
+    if (p->ewa_channel)
+        (void)WTSVirtualChannelClose(p->ewa_channel);
     if (p->started)
         server->callbacks.session_ended(server->callbacks.user, as_session(p));
 
@@ -808,18 +895,18 @@ out:
     return 0;
 }
 
-static BOOL mrc_peer_accepted(freerdp_listener *listener, freerdp_peer *client) {
-    mrc_server *server = listener->info;
+static BOOL mrs_peer_accepted(freerdp_listener *listener, freerdp_peer *client) {
+    mrs_server *server = listener->info;
     client->ContextExtra = server;
-    client->ContextSize = sizeof(mrc_peer);
-    client->ContextNew = mrc_peer_context_new;
-    client->ContextFree = mrc_peer_context_free;
+    client->ContextSize = sizeof(mrs_peer);
+    client->ContextNew = mrs_peer_context_new;
+    client->ContextFree = mrs_peer_context_free;
     if (!freerdp_peer_context_new_ex(client, server->settings)) {
         freerdp_peer_free(client);
         return FALSE;
     }
-    mrc_log("connection from %s", client->hostname);
-    HANDLE thread = CreateThread(NULL, 0, mrc_session_thread, client, 0, NULL);
+    mrs_log("connection from %s", client->hostname);
+    HANDLE thread = CreateThread(NULL, 0, mrs_session_thread, client, 0, NULL);
     if (!thread) {
         freerdp_peer_context_free(client);
         freerdp_peer_free(client);
@@ -831,16 +918,16 @@ static BOOL mrc_peer_accepted(freerdp_listener *listener, freerdp_peer *client) 
 
 // MARK: - Server
 
-static BOOL mrc_configure(rdpSettings *s, const char *dir, char *error, size_t error_len) {
-    char *cert_path = mrc_path(dir, MRC_CERT_NAME ".crt");
-    char *key_path = mrc_path(dir, MRC_CERT_NAME ".key");
-    char *sam_path = mrc_path(dir, MRC_SAM_NAME);
+static BOOL mrs_configure(rdpSettings *s, const char *dir, char *error, size_t error_len) {
+    char *cert_path = mrs_path(dir, MRS_CERT_NAME ".crt");
+    char *key_path = mrs_path(dir, MRS_CERT_NAME ".key");
+    char *sam_path = mrs_path(dir, MRS_SAM_NAME);
     BOOL ok = FALSE;
     if (!cert_path || !key_path || !sam_path)
         goto out;
 
     if (!winpr_PathFileExists(sam_path)) {
-        mrc_set_error(error, error_len, "no sign-in password set (run: mac-rdp-connect set-password)");
+        mrs_set_error(error, error_len, "no sign-in password set (run: mac-rdp-server set-password)");
         goto out;
     }
     rdpCertificate *cert = freerdp_certificate_new_from_file(cert_path);
@@ -848,7 +935,7 @@ static BOOL mrc_configure(rdpSettings *s, const char *dir, char *error, size_t e
     if (!cert || !key) {
         freerdp_certificate_free(cert);
         freerdp_key_free(key);
-        mrc_set_error(error, error_len, "cannot load TLS certificate from %s", dir);
+        mrs_set_error(error, error_len, "cannot load TLS certificate from %s", dir);
         goto out;
     }
 
@@ -873,7 +960,7 @@ static BOOL mrc_configure(rdpSettings *s, const char *dir, char *error, size_t e
          freerdp_settings_set_bool(s, FreeRDP_FrameMarkerCommandEnabled, TRUE) &&
          freerdp_settings_set_bool(s, FreeRDP_SurfaceFrameMarkerEnabled, TRUE);
     if (!ok)
-        mrc_set_error(error, error_len, "invalid server settings");
+        mrs_set_error(error, error_len, "invalid server settings");
 out:
     free(cert_path);
     free(key_path);
@@ -881,8 +968,8 @@ out:
     return ok;
 }
 
-static DWORD WINAPI mrc_listener_thread(LPVOID arg) {
-    mrc_server *server = arg;
+static DWORD WINAPI mrs_listener_thread(LPVOID arg) {
+    mrs_server *server = arg;
     freerdp_listener *listener = server->listener;
     for (;;) {
         HANDLE events[MAXIMUM_WAIT_OBJECTS];
@@ -895,7 +982,7 @@ static DWORD WINAPI mrc_listener_thread(LPVOID arg) {
         if (WaitForSingleObject(server->stop_event, 0) == WAIT_OBJECT_0)
             break;
         if (!listener->CheckFileDescriptor(listener)) {
-            mrc_log("listener failed");
+            mrs_log("listener failed");
             break;
         }
     }
@@ -903,19 +990,19 @@ static DWORD WINAPI mrc_listener_thread(LPVOID arg) {
     return 0;
 }
 
-static void mrc_global_init(void) {
+static void mrs_global_init(void) {
     winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT);
     WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi());
     WSADATA wsa;
     (void)WSAStartup(MAKEWORD(2, 2), &wsa);
 }
 
-mrc_server *mrc_server_start(const mrc_server_config *config, const mrc_callbacks *callbacks,
+mrs_server *mrs_server_start(const mrs_server_config *config, const mrs_callbacks *callbacks,
                            char *error, size_t error_len) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, mrc_global_init);
+    pthread_once(&once, mrs_global_init);
 
-    mrc_server *server = calloc(1, sizeof(mrc_server));
+    mrs_server *server = calloc(1, sizeof(mrs_server));
     if (!server)
         return NULL;
     server->callbacks = *callbacks;
@@ -923,24 +1010,24 @@ mrc_server *mrc_server_start(const mrc_server_config *config, const mrc_callback
     server->stop_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     server->listener = freerdp_listener_new();
     if (!server->settings || !server->stop_event || !server->listener) {
-        mrc_set_error(error, error_len, "out of memory");
+        mrs_set_error(error, error_len, "out of memory");
         goto fail;
     }
-    if (!mrc_configure(server->settings, config->config_dir, error, error_len))
+    if (!mrs_configure(server->settings, config->config_dir, error, error_len))
         goto fail;
 
     server->listener->info = server;
-    server->listener->PeerAccepted = mrc_peer_accepted;
+    server->listener->PeerAccepted = mrs_peer_accepted;
     if (!server->listener->Open(server->listener, config->bind_address, config->port)) {
-        mrc_set_error(error, error_len, "cannot listen on port %u (already in use?)", config->port);
+        mrs_set_error(error, error_len, "cannot listen on port %u (already in use?)", config->port);
         goto fail;
     }
-    server->thread = CreateThread(NULL, 0, mrc_listener_thread, server, 0, NULL);
+    server->thread = CreateThread(NULL, 0, mrs_listener_thread, server, 0, NULL);
     if (!server->thread) {
-        mrc_set_error(error, error_len, "cannot start listener thread");
+        mrs_set_error(error, error_len, "cannot start listener thread");
         goto fail;
     }
-    mrc_log("listening on port %u", config->port);
+    mrs_log("listening on port %u", config->port);
     return server;
 
 fail:
@@ -953,7 +1040,7 @@ fail:
     return NULL;
 }
 
-void mrc_server_stop(mrc_server *server) {
+void mrs_server_stop(mrs_server *server) {
     if (!server)
         return;
     SetEvent(server->stop_event);
@@ -966,9 +1053,9 @@ void mrc_server_stop(mrc_server *server) {
 
 // MARK: - Setup helpers
 
-int mrc_ensure_certificate(const char *config_dir, char *error, size_t error_len) {
-    char *cert_path = mrc_path(config_dir, MRC_CERT_NAME ".crt");
-    char *key_path = mrc_path(config_dir, MRC_CERT_NAME ".key");
+int mrs_ensure_certificate(const char *config_dir, char *error, size_t error_len) {
+    char *cert_path = mrs_path(config_dir, MRS_CERT_NAME ".crt");
+    char *key_path = mrs_path(config_dir, MRS_CERT_NAME ".key");
     int rc = -1;
     if (!cert_path || !key_path)
         goto out;
@@ -980,13 +1067,13 @@ int mrc_ensure_certificate(const char *config_dir, char *error, size_t error_len
     char *argv[] = {"makecert", "-rdp", "-live", "-silent", "-y", "5"};
     MAKECERT_CONTEXT *ctx = makecert_context_new();
     if (ctx && makecert_context_process(ctx, ARRAYSIZE(argv), argv) >= 0 &&
-        makecert_context_set_output_file_name(ctx, MRC_CERT_NAME) == 1 &&
+        makecert_context_set_output_file_name(ctx, MRS_CERT_NAME) == 1 &&
         makecert_context_output_certificate_file(ctx, config_dir) == 1 &&
         makecert_context_output_private_key_file(ctx, config_dir) == 1) {
         chmod(key_path, 0600);
         rc = 0;
     } else {
-        mrc_set_error(error, error_len, "cannot create a TLS certificate in %s", config_dir);
+        mrs_set_error(error, error_len, "cannot create a TLS certificate in %s", config_dir);
     }
     makecert_context_free(ctx);
 out:
@@ -995,25 +1082,25 @@ out:
     return rc;
 }
 
-int mrc_write_credentials(const char *config_dir, const char *user, const char *password,
+int mrs_write_credentials(const char *config_dir, const char *user, const char *password,
                          char *error, size_t error_len) {
     if (!user || !*user || strchr(user, ':') || strchr(user, '\n')) {
-        mrc_set_error(error, error_len, "invalid user name");
+        mrs_set_error(error, error_len, "invalid user name");
         return -1;
     }
     BYTE hash[16];
     if (!NTOWFv1A((LPSTR)password, (UINT32)strlen(password), hash)) {
-        mrc_set_error(error, error_len, "cannot hash password");
+        mrs_set_error(error, error_len, "cannot hash password");
         return -1;
     }
-    char *path = mrc_path(config_dir, MRC_SAM_NAME);
+    char *path = mrs_path(config_dir, MRS_SAM_NAME);
     if (!path)
         return -1;
 
     // SAM line: User:Domain:LMHash:NTHash::: (empty domain matches any).
     FILE *f = fopen(path, "w");
     if (!f) {
-        mrc_set_error(error, error_len, "cannot write %s", path);
+        mrs_set_error(error, error_len, "cannot write %s", path);
         free(path);
         return -1;
     }

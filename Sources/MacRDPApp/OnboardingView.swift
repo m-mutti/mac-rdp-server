@@ -46,7 +46,7 @@ struct OnboardingView: View {
     private var permissions: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Allow access").font(.title2.bold())
-            Text("macOS asks before any app can show your screen to another computer or accept keyboard and mouse input. Switch on **mac-rdp-connect** in each list.")
+            Text("macOS asks before any app can show your screen to another computer or accept keyboard and mouse input. Switch on **mac-rdp-server** in each list.")
                 .fixedSize(horizontal: false, vertical: true)
             PermissionsChecklist(model: model)
         }

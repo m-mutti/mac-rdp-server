@@ -8,7 +8,7 @@ struct MenuBarPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("mac-rdp-connect").font(.headline)
+                Text("mac-rdp-server").font(.headline)
                 Spacer()
                 Circle().fill(statusColor).frame(width: 8, height: 8)
             }
@@ -39,7 +39,7 @@ struct MenuBarPanel: View {
             Divider()
             HStack {
                 if model.isRunning {
-                    Button("Stop Server", action: model.stopServer)
+                    Button("Stop Server", action: model.stopServerByUser)
                 } else {
                     Button("Start Server", action: model.startServer)
                 }
@@ -55,7 +55,7 @@ struct MenuBarPanel: View {
                 }
                 menuButton("Settings…") { model.showSettings() }
                 menuButton("Open Log", action: model.openLog)
-                menuButton("Quit mac-rdp-connect") { NSApp.terminate(nil) }
+                menuButton("Quit mac-rdp-server") { NSApp.terminate(nil) }
             }
         }
         .padding(14)

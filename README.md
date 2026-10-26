@@ -1,103 +1,154 @@
-# mac-rdp-connect
+# mac-rdp-server
 
-Use a Windows PC as a terminal for your Mac. mac-rdp-connect is an RDP server for macOS:
-connect from Windows with the built-in **Remote Desktop Connection** (`mstsc`), and
-the Mac takes on the Windows PC's monitors and devices as if they were plugged in locally.
-Nothing needs installing on Windows.
-
-## How it fits together
+**An RDP server for your Mac.** Connect from any Windows PC with the Remote Desktop Connection
+app that's already built into Windows, and use your Mac across all of your Windows monitors, with
+the keyboard, mouse and other peripherals plugged into the PC.
 
 ```
- Windows (mstsc)                                Mac (mac-rdp-connect)
- ───────────────                                ──────────────────────
- monitor layout  ── MCS / Display Control ───▶  one CGVirtualDisplay per monitor,
-                                                 same sizes, positions and DPI
- H.264 decoder   ◀─ Graphics Pipeline AVC420 ─  ScreenCaptureKit ▶ VideoToolbox (HW)
- keyboard/mouse  ── fast-path input ─────────▶  CGEvent injection, PC→Mac key map
- devices         ◀─ virtual channels ────────▶  virtual Mac devices (table below)
+  Windows PC                                  Mac
+  ┌───────────────────────────┐               ┌───────────────────────────┐
+  │ Remote Desktop Connection │    picture    │ mac-rdp-server            │
+  │ (built into Windows)      │ ◀──────────── │                           │
+  │                           │               │                           │
+  │ monitor 1    monitor 2    │   keyboard,   │ display 1    display 2    │
+  │                           │   mouse and   │                           │
+  │                           │  peripherals  │                           │
+  │                           │ ────────────▶ │                           │
+  └───────────────────────────┘               └───────────────────────────┘
 ```
 
-The protocol layer is [FreeRDP](https://github.com/FreeRDP/FreeRDP)'s server library
-(Apache-2.0); everything macOS-specific lives in `Sources/MacRDPConnectKit`.
+## Advantages
 
-## Devices
+- **Nothing to install on Windows.** It works with Windows' own Remote Desktop Connection.
+- **Multiple displays.** Every Windows monitor becomes a real Mac display with the same
+  resolution, arrangement and scaling. A monitor at 125% on Windows is Retina-sharp on the Mac.
+  It works even if the Mac itself has a single screen.
+- **Your peripherals, connected to the Mac.** The keyboard and mouse on the PC work as if they
+  were plugged into the Mac, and more peripherals are being added (see [Peripherals](#peripherals)).
+- **Smooth and sharp.** Hardware H.264 encoding on Apple silicon, frame pacing that keeps latency
+  low, and a cursor drawn on Windows so it never lags.
+- **Secure.** Windows must prove the password before anything is shown (Network Level
+  Authentication), over a connection encrypted with the Mac's own certificate.
+- **Simple.** A menu bar app with guided setup: permissions, password, and the address to
+  connect to.
 
-| Windows device | RDP channel | Appears on the Mac as | Requires |
-|---|---|---|---|
-| Monitors (any count, mixed DPI) | Monitor layout, Display Control (MS-RDPEDISP), Graphics Pipeline (MS-RDPEGFX) | Virtual displays | Screen Recording permission |
-| Keyboard, mouse | Fast-path input | Native input events | Accessibility permission |
-| Speakers / headset | Audio output (MS-RDPEA) | "Windows Speakers" output device | One-time admin install of an audio driver (HAL plug-in) |
-| Microphone | Audio input (MS-RDPEAI) | "Windows Microphone" input device | Same driver |
-| Clipboard: text, images, files | MS-RDPECLIP | Mac pasteboard | — |
-| Drives / folders | File system redirection (MS-RDPEFS) | Volume in Finder | — |
-| Security key: FIDO2, passkeys, Windows Hello | WebAuthn redirection (MS-RDPEWA, Windows 11) | USB security key (virtual FIDO HID) | Apple Developer account with the `com.apple.developer.hid.virtual.device` entitlement |
-| Security key: PIV / smart card | Smart card redirection (MS-RDPESC) | Smart card reader | One-time admin install of a reader driver |
-| Webcam | Video capture redirection (MS-RDPECAM, Windows 11) | Camera | Developer ID signing (camera extension) |
-| Arbitrary USB devices | RemoteFX USB (MS-RDPEUSB) | — | **Not planned:** needs a kernel extension and Reduced Security boot on Apple silicon |
+## Requirements
 
-## Status
+- A Mac with Apple silicon, running macOS 14 or later.
+- A Windows 10 or 11 PC with Remote Desktop Connection.
+- Both on the same network, or connected through a VPN such as Tailscale.
 
-**Working (verified on macOS 26.3 / M4):**
-- RDP server on FreeRDP 3.32: NLA sign-in only (no TLS-only or legacy RDP security),
-  self-signed certificate, one client at a time.
-- One virtual display per Windows monitor, with the same size, position and scaling
-  (a 4K monitor at 150% "looks like" 2560×1440, like a Retina Mac). Physical screens mirror
-  the primary so no window lands where you can't see it. Everything reverts on disconnect.
-- One hardware H.264 stream per monitor over the graphics pipeline (AVC420), with flow
-  control on frame acknowledgements so latency doesn't build up.
-- Keyboard (Win key = Command by default), mouse, wheel, back/forward buttons, Unicode text,
-  and a locally drawn cursor that matches the Mac's cursor shape.
-- Live re-layout when the client resizes or changes monitors (display control channel).
+## Install
 
-**Next:** clipboard, then the audio driver for speakers and microphone, smart cards and drives;
-then signed builds for the FIDO security key and webcam, a menu bar app, and launch at login.
+1. Download the `.dmg` from [Releases](../../releases), open it, and drag **mac-rdp-server**
+   into **Applications**.
+2. The app isn't notarized by Apple yet, so clear the download quarantine in Terminal:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/mac-rdp-server.app
+   ```
+3. Open **mac-rdp-server**. Setup walks you through:
+   - **Permissions:** *Screen Recording* lets Windows see the Mac's screen, and *Accessibility*
+     lets the Windows keyboard and mouse control it.
+   - **Sign-in:** the user name and password Windows signs in with. This is separate from your
+     Mac login password.
+   - **Connect:** the address to use from Windows.
 
-## Using it
+From then on mac-rdp-server lives in the menu bar, and its server runs whenever the app is open.
 
-Open **mac-rdp-connect.app** (from the release DMG, or `./scripts/run.sh` after building).
-It lives in the menu bar; the first launch walks through setup:
+## Connect from Windows
 
-1. **Permissions:** Screen Recording (Windows sees the screen) and Accessibility (Windows'
-   keyboard and mouse control the Mac), each with live status and a button to open the right
-   System Settings pane. macOS applies Screen Recording after a restart, which the app offers.
-2. **Sign-in:** the user name and password Windows signs in with, separate from your Mac login.
-3. **Connect:** the addresses to use from Windows (local network and Tailscale), and a ready-made
-   `.rdp` file to copy to the PC.
+1. Open **Remote Desktop Connection** (search for "Remote Desktop" in the Start menu).
+2. Enter the Mac's address, shown in the mac-rdp-server menu.
+3. Click **Show Options › Display** and tick **Use all my monitors**.
+4. Click **Connect**, sign in with the user name and password from setup, and accept the
+   certificate prompt the first time.
 
-The menu bar panel shows whether Windows is connected, any permission or connection problem,
-the addresses to connect to, and Start/Stop, Disconnect, Settings and the log. **Settings** has:
+Every monitor fills with the Mac. To finish, close the Remote Desktop window; the Mac's own
+screen goes back to normal. **Save Remote Desktop File…** in the app creates a ready-made
+`.rdp` file you can copy to the PC and double-click instead.
 
-| Tab | What it does |
+## Peripherals
+
+| Peripheral | Status |
 |---|---|
-| Sign-in | Shows the user name and password (reveal, copy, generate) and changes them |
-| Permissions | The same live checks as setup |
-| Connection | Server status, port, addresses, `.rdp` file |
-| Display & Keyboard | Windows key or Ctrl as ⌘, scaling, mirroring the Mac's screen, compatibility video |
+| Monitors: any number, mixed resolutions and scaling | ✅ Works |
+| Keyboard and mouse, including the scroll wheel, back/forward buttons and typed text from any language | ✅ Works |
+| Security keys and Windows Hello (FIDO2, passkeys) | 🚧 Built in. Mac apps can use them once Apple approves this app's virtual-device permission (macOS 15 or later) |
+| Clipboard: text, images and files | Planned |
+| Speakers and headset | Planned |
+| Microphone | Planned |
+| Drives and folders | Planned |
+| Webcam | Planned |
+| Other USB devices | Not planned: macOS allows this only with a kernel extension |
 
-The password is stored as an NT hash for sign-in and, so Settings can show it, in your login
-Keychain. On Windows, open Remote Desktop Connection, enter the Mac's address, tick
-*Display › Use all my monitors*, and sign in. The log is `~/Library/Logs/mac-rdp-connect.log`;
-every 5 seconds it reports frames sent versus frames acknowledged by Windows.
+## Settings
 
-Until the app is signed with a developer certificate, every rebuild makes macOS forget its
-permissions and ask again before it reads the Keychain.
+The menu bar panel shows whether Windows is connected, the addresses to connect to, and any
+problem that needs attention. **Settings** has four tabs:
 
-The same binary also works headless: `mac-rdp-connect serve`, `set-password`, `rdp-file`,
-`doctor` (run it with no command for the app).
+| Tab | What it's for |
+|---|---|
+| Sign-in | See the user name and password (show, copy, generate) and change them |
+| Permissions | Check Screen Recording and Accessibility, and fix them |
+| Connection | Start or stop the server, change the port, save a `.rdp` file |
+| Display & Keyboard | Windows key or Ctrl as ⌘, scaling, what the Mac's own screen shows |
 
-## Building
+## Troubleshooting
 
-Requires only the Xcode Command Line Tools.
+- **Windows connects but stays black:** turn on *Compatibility video* in Settings › Display &
+  Keyboard.
+- **Keyboard and mouse do nothing:** check Settings › Permissions. After installing a new
+  version, macOS can show Accessibility as allowed while ignoring it. Remove mac-rdp-server from
+  the list in System Settings with **−**, then allow it again.
+- **Can't connect:** check the address in the menu, and that the Mac is awake and logged in.
+  The server uses TCP port 3389.
+- **Security keys aren't offered:** in Remote Desktop Connection, open **Show Options › Local
+  Resources › More…** and tick **WebAuthn (Windows Hello or security keys)**.
+- **Logs:** menu bar › **Open Log**, or `~/Library/Logs/mac-rdp-server.log`.
+
+## Limitations
+
+- One Windows connection at a time.
+- The Mac must already be logged in; connecting to the login screen isn't supported yet.
+- Releases aren't signed or notarized yet. Until they are, macOS asks for permissions again
+  after each update.
+
+## How it works
+
+mac-rdp-server speaks the Remote Desktop Protocol through [FreeRDP](https://github.com/FreeRDP/FreeRDP)'s
+server library. When Windows connects, it reports its monitors, and the Mac creates a virtual
+display for each one with the same size, position and scaling. ScreenCaptureKit captures every
+display, the Apple silicon media engine encodes it as H.264, and the stream travels over
+Remote Desktop's graphics pipeline, one stream per monitor. Keyboard and mouse input comes back
+and is replayed as native macOS events. Peripherals use Remote Desktop's own redirection
+channels; security keys, for example, arrive through WebAuthn redirection and appear on the Mac
+as a USB security key.
+
+## Building from source
+
+Only the Xcode Command Line Tools are needed. The bootstrap script builds CMake, OpenSSL and
+FreeRDP into `third_party/` without Homebrew or admin rights.
 
 ```sh
-./scripts/bootstrap.sh   # one-time: CMake, OpenSSL, FreeRDP into third_party/ (no admin)
+./scripts/bootstrap.sh   # one time
 swift build
-./scripts/test.sh
+./scripts/test.sh        # tests
+./scripts/bundle.sh      # builds build/mac-rdp-server.app
+./scripts/run.sh         # opens the app and follows its log
 ```
 
-Diagnostics:
+The app's binary also works from the command line: `mac-rdp-server serve` runs the server
+without the menu bar app, and `set-password`, `rdp-file` and `doctor` cover setup and checks.
 
-```sh
-.build/debug/mac-rdp-connect doctor
-.build/debug/mac-rdp-connect displays --layout 2560x1440@125,1920x1080 --seconds 10
-```
+| Path | Contents |
+|---|---|
+| `Sources/CRDPServer` | C layer over FreeRDP's server: sessions, graphics, display control, WebAuthn |
+| `Sources/MacRDPKit` | macOS pieces: virtual displays, capture, H.264, input, CBOR/CTAP |
+| `Sources/MacRDPHost` | The server: sessions, streams, cursor, sign-in, security key |
+| `Sources/MacRDPApp` | The menu bar app: setup, settings, status |
+| `Sources/mac-rdp-server` | Entry point and command line |
+
+## Acknowledgements
+
+Built on [FreeRDP](https://github.com/FreeRDP/FreeRDP) and [OpenSSL](https://www.openssl.org),
+both under the Apache License 2.0.

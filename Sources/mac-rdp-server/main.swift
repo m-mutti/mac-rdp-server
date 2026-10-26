@@ -1,19 +1,19 @@
 import AppKit
 import CoreGraphics
 import Foundation
-import MacRDPConnectKit
-import MacRDPConnectServer
-import MacRDPConnectUI
+import MacRDPKit
+import MacRDPHost
+import MacRDPApp
 
 let usage = """
-usage: mac-rdp-connect [<command> [options]]
+usage: mac-rdp-server [<command> [options]]
 
 Without a command (e.g. opened from Finder) it runs as a menu bar app.
 
 commands:
   serve [options]             run the RDP server (connect with Windows Remote Desktop)
   set-password [--user U]     set the password Windows signs in with (default user: you)
-  rdp-file [--out F]          write a Remote Desktop file for Windows (default: mac-rdp-connect.rdp)
+  rdp-file [--out F]          write a Remote Desktop file for Windows (default: mac-rdp-server.rdp)
   doctor                      check permissions and list displays
   displays [options]          create virtual displays for a client layout, hold, then remove them
   record [options] --out F    create virtual displays, capture + H.264-encode the primary one to F
@@ -26,7 +26,7 @@ options:
   --physical P   mirror | extend               (default mirror)
   --h264 P       high | baseline               (default high; try baseline if Windows shows black)
   --address A    address Windows connects to   (default: this Mac's LAN address)
-  --config DIR   settings directory            (default ~/Library/Application Support/mac-rdp-connect)
+  --config DIR   settings directory            (default ~/Library/Application Support/mac-rdp-server)
   --layout L     comma-separated monitors, first is primary: WxH[@scale%][+X+Y]
                  e.g. 2560x1440,1920x1080+2560+0  or  3840x2160@150   (default 1920x1080)
   --seconds N    how long to hold              (default 10)
@@ -160,7 +160,7 @@ var signalSources: [DispatchSourceSignal] = []
 // Finder and `open` launch the app without a command (older macOS adds -psn_…).
 let arguments = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") }
 if arguments.isEmpty || arguments.first == "--show" {
-    MacRDPConnectApp.run(showing: arguments.dropFirst().first)
+    MacRDPServerApp.run(showing: arguments.dropFirst().first)
 }
 
 let options = parseOptions(Array(arguments))
@@ -218,29 +218,29 @@ case "set-password":
 
 case "rdp-file":
     let address = require(options.address ?? lanAddress(), "cannot find this Mac's network address; pass --address")
-    let path = options.out ?? "mac-rdp-connect.rdp"
+    let path = options.out ?? "mac-rdp-server.rdp"
     try RemoteDesktopFile.contents(address: address, port: options.port, user: options.user)
         .write(toFile: path, atomically: true, encoding: .utf8)
     print("wrote \(path) for \(address) — copy it to the Windows PC and double-click it")
 
 case "serve":
     guard CredentialStore.hasPassword(directory: options.config) else {
-        fail("set the sign-in password first: mac-rdp-connect set-password")
+        fail("set the sign-in password first: mac-rdp-server set-password")
     }
     try RDPHost.prepare(directory: options.config)
     // A window-server connection is needed to read the cursor shape.
     NSApplication.shared.setActivationPolicy(.accessory)
     // Permissions belong to whichever app launched us; only ask macOS for
-    // them when that is mac-rdp-connect.app, not a terminal.
+    // them when that is mac-rdp-server.app, not a terminal.
     let isApp = Bundle.main.bundleIdentifier != nil
     if !CGPreflightScreenCaptureAccess() {
         if isApp { _ = CGRequestScreenCaptureAccess() }
         print("warning: Screen Recording is not allowed yet — Windows will connect but see nothing."
-              + " Allow mac-rdp-connect in System Settings › Privacy & Security › Screen & System Audio Recording, then restart.")
+              + " Allow mac-rdp-server in System Settings › Privacy & Security › Screen & System Audio Recording, then restart.")
     }
     if !InputInjector.isTrusted(prompt: isApp) {
         print("warning: Accessibility is not allowed yet — keyboard and mouse from Windows will be ignored."
-              + " Allow mac-rdp-connect in System Settings › Privacy & Security › Accessibility.")
+              + " Allow mac-rdp-server in System Settings › Privacy & Security › Accessibility.")
     }
 
     var hostOptions = RDPHost.Options()

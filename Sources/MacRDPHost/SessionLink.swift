@@ -1,6 +1,6 @@
 import CRDPServer
 import Foundation
-import MacRDPConnectKit
+import MacRDPKit
 
 func log(_ message: String) {
     let stamp = Date.now.formatted(Date.VerbatimFormatStyle(
@@ -32,7 +32,7 @@ final class SessionLink: @unchecked Sendable {
     var hasCredit: Bool {
         lock.withLock {
             guard let handle else { return false }
-            return mrc_session_frames_in_flight(handle) < maxInFlight
+            return mrs_session_frames_in_flight(handle) < maxInFlight
         }
     }
 
@@ -40,7 +40,7 @@ final class SessionLink: @unchecked Sendable {
         lock.withLock {
             guard let handle else { return }
             _ = frame.withUnsafeBytes { raw in
-                mrc_session_send_h264(handle, generation, UInt32(index),
+                mrs_session_send_h264(handle, generation, UInt32(index),
                                      raw.baseAddress!.assumingMemoryBound(to: UInt8.self), raw.count)
             }
         }
@@ -50,11 +50,11 @@ final class SessionLink: @unchecked Sendable {
         lock.withLock {
             guard let handle else { return }
             guard let cursor else {
-                mrc_session_set_pointer(handle, nil, 0, 0, 0, 0)
+                mrs_session_set_pointer(handle, nil, 0, 0, 0, 0)
                 return
             }
             _ = cursor.bgra.withUnsafeBytes { raw in
-                mrc_session_set_pointer(handle, raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                mrs_session_set_pointer(handle, raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
                                        UInt32(cursor.width), UInt32(cursor.height),
                                        UInt32(cursor.hotX), UInt32(cursor.hotY))
             }
@@ -62,13 +62,13 @@ final class SessionLink: @unchecked Sendable {
     }
 
     func resetLayout(_ layout: MonitorLayout, generation: UInt32) {
-        let monitors = layout.monitors.map(mrc_monitor.init)
+        let monitors = layout.monitors.map(mrs_monitor.init)
         lock.withLock {
             guard let handle else { return }
             // A frame per monitor in flight plus a little slack keeps latency to ~1 frame.
             maxInFlight = UInt32(layout.monitors.count + 2)
             _ = monitors.withUnsafeBufferPointer {
-                mrc_session_reset_layout(handle, generation, $0.baseAddress, UInt32($0.count))
+                mrs_session_reset_layout(handle, generation, $0.baseAddress, UInt32($0.count))
             }
         }
     }
@@ -77,15 +77,24 @@ final class SessionLink: @unchecked Sendable {
         lock.withLock { maxInFlight = UInt32(count + 2) }
     }
 
+    func sendWebAuthn(_ message: Data) {
+        lock.withLock {
+            guard let handle else { return }
+            _ = message.withUnsafeBytes { raw in
+                mrs_session_webauthn_send(handle, raw.baseAddress!.assumingMemoryBound(to: UInt8.self), raw.count)
+            }
+        }
+    }
+
     func close() {
         lock.withLock {
             guard let handle else { return }
-            mrc_session_close(handle)
+            mrs_session_close(handle)
         }
     }
 }
 
-extension mrc_monitor {
+extension mrs_monitor {
     init(_ spec: MonitorSpec) {
         self.init(x: Int32(spec.x), y: Int32(spec.y), width: UInt32(spec.width), height: UInt32(spec.height),
                   is_primary: spec.isPrimary ? 1 : 0, scale_percent: UInt32(spec.scalePercent))
@@ -93,7 +102,7 @@ extension mrc_monitor {
 }
 
 extension MonitorSpec {
-    init(_ m: mrc_monitor) {
+    init(_ m: mrs_monitor) {
         self.init(x: Int(m.x), y: Int(m.y), width: Int(m.width), height: Int(m.height),
                   isPrimary: m.is_primary != 0, scalePercent: Int(m.scale_percent))
     }

@@ -5,20 +5,20 @@
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:open_connect}",
-            "name": "Debug mac-rdp-connect",
-            "target": "mac-rdp-connect",
+            "name": "Debug mac-rdp-server",
+            "target": "mac-rdp-server",
             "configuration": "debug",
-            "preLaunchTask": "swift: Build Debug mac-rdp-connect"
+            "preLaunchTask": "swift: Build Debug mac-rdp-server"
         },
         {
             "type": "swift",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:open_connect}",
-            "name": "Release mac-rdp-connect",
-            "target": "mac-rdp-connect",
+            "name": "Release mac-rdp-server",
+            "target": "mac-rdp-server",
             "configuration": "release",
-            "preLaunchTask": "swift: Build Release mac-rdp-connect"
+            "preLaunchTask": "swift: Build Release mac-rdp-server"
         }
     ]
 }

@@ -1,5 +1,5 @@
 import AppKit
-import MacRDPConnectServer
+import MacRDPHost
 import SwiftUI
 
 /// Screen Recording and Accessibility with live status and a way to fix each.
@@ -20,7 +20,7 @@ struct PermissionsChecklist: View {
             if model.screenRecordingRequested && !model.permissions.screenRecording {
                 HStack(alignment: .firstTextBaseline) {
                     Image(systemName: "arrow.clockwise")
-                    Text("Already switched on Screen Recording? macOS applies it after mac-rdp-connect restarts.")
+                    Text("Already switched on Screen Recording? macOS applies it after mac-rdp-server restarts.")
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     Button("Restart", action: model.relaunch)

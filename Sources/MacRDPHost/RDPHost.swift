@@ -1,6 +1,6 @@
 import CRDPServer
 import Foundation
-import MacRDPConnectKit
+import MacRDPKit
 
 public struct HostError: Error, CustomStringConvertible {
     public let description: String
@@ -39,20 +39,20 @@ public final class RDPHost {
 
     public nonisolated static let defaultConfigDirectory = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("mac-rdp-connect", isDirectory: true)
+        .appendingPathComponent("mac-rdp-server", isDirectory: true)
 
     /// Creates the config directory and a TLS certificate on first use.
     public nonisolated static func prepare(directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         var error = [CChar](repeating: 0, count: 256)
-        guard mrc_ensure_certificate(directory.path, &error, error.count) == 0 else { throw HostError(error) }
+        guard mrs_ensure_certificate(directory.path, &error, error.count) == 0 else { throw HostError(error) }
     }
 
     nonisolated let options: Options
     /// Session changes and problems, delivered on the main actor.
     public var onEvent: (HostEvent) -> Void = { _ in }
-    private nonisolated let live = LiveSession()
+    nonisolated let live = LiveSession()
     private var server: OpaquePointer?
     private var session: HostSession?
 
@@ -61,7 +61,7 @@ public final class RDPHost {
     }
 
     public func start() throws {
-        var config = mrc_server_config()
+        var config = mrs_server_config()
         config.port = options.port
         var callbacks = makeCallbacks()
         var error = [CChar](repeating: 0, count: 256)
@@ -70,7 +70,7 @@ public final class RDPHost {
         config.bind_address = UnsafePointer(bind)
         let started = options.configDirectory.path.withCString { path in
             config.config_dir = path
-            return mrc_server_start(&config, &callbacks, &error, error.count)
+            return mrs_server_start(&config, &callbacks, &error, error.count)
         }
         guard let started else { throw HostError(error) }
         server = started
@@ -78,7 +78,7 @@ public final class RDPHost {
 
     public func stop() {
         session?.link.close()
-        mrc_server_stop(server)
+        mrs_server_stop(server)
         server = nil
     }
 
@@ -86,6 +86,7 @@ public final class RDPHost {
     public func disconnectClient() {
         session?.link.close()
     }
+
 
     // MARK: Session lifecycle (FreeRDP threads)
 
@@ -99,7 +100,8 @@ public final class RDPHost {
         }
         let link = SessionLink(handle)
         let streams = StreamSet()
-        guard live.claim(link, streams: streams) else {
+        let webAuthn = WebAuthnRelay(link: link)
+        guard live.claim(link, streams: streams, webAuthn: webAuthn) else {
             refuse("refused \(client): another session is active")
             return false
         }
@@ -108,7 +110,8 @@ public final class RDPHost {
         let options = self.options
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
-                let session = HostSession(link: link, layout: layout, options: options, streams: streams)
+                let session = HostSession(link: link, layout: layout, options: options, streams: streams,
+                                          webAuthn: webAuthn)
                 session.onProblem = { [weak self] in self?.onEvent(.problem($0)) }
                 self.session = session
                 self.onEvent(.connected(client: client, monitors: layout.monitors.count))
@@ -119,8 +122,9 @@ public final class RDPHost {
     }
 
     nonisolated func sessionEnded(_ id: Int) {
-        guard let link = live.release(id) else { return }
+        guard let (link, webAuthn) = live.release(id) else { return }
         link.detach()
+        webAuthn.close()
         onSession(id) { host, session in
             host.session = nil
             host.onEvent(.disconnected)
@@ -157,8 +161,8 @@ public final class RDPHost {
     }
 
     // nonisolated: FreeRDP invokes these from its own threads.
-    private nonisolated func makeCallbacks() -> mrc_callbacks {
-        var cb = mrc_callbacks()
+    private nonisolated func makeCallbacks() -> mrs_callbacks {
+        var cb = mrs_callbacks()
         cb.user = Unmanaged.passUnretained(self).toOpaque()
         cb.session_started = { user, session, client, monitors, count in
             guard let session, let monitors else { return -1 }
@@ -199,6 +203,15 @@ public final class RDPHost {
             RDPHost.from(user).deliver(RDPInputEvent.extendedMouse(flags: flags, x: x, y: y),
                                        to: Int(bitPattern: session))
         }
+        cb.webauthn_available = { user, session, available in
+            RDPHost.from(user).onSession(Int(bitPattern: session)) { _, s in
+                Task { await s.webAuthnAvailabilityChanged(available != 0) }
+            }
+        }
+        cb.webauthn_response = { user, session, data, length in
+            guard let data else { return }
+            RDPHost.from(user).live.webAuthn(of: Int(bitPattern: session))?.deliver(Data(bytes: data, count: length))
+        }
         cb.session_ended = { user, session in
             RDPHost.from(user).sessionEnded(Int(bitPattern: session))
             log("session ended")
@@ -216,28 +229,35 @@ final class LiveSession: @unchecked Sendable {
     private let lock = NSLock()
     private var link: SessionLink?
     private var streams: StreamSet?
+    private var webAuthn: WebAuthnRelay?
 
-    func claim(_ link: SessionLink, streams: StreamSet) -> Bool {
+    func claim(_ link: SessionLink, streams: StreamSet, webAuthn: WebAuthnRelay) -> Bool {
         lock.withLock {
             guard self.link == nil else { return false }
             self.link = link
             self.streams = streams
+            self.webAuthn = webAuthn
             return true
         }
     }
 
-    func release(_ id: Int) -> SessionLink? {
+    func release(_ id: Int) -> (SessionLink, WebAuthnRelay)? {
         lock.withLock {
-            guard let link, link.id == id else { return nil }
+            guard let link, link.id == id, let webAuthn else { return nil }
             defer {
                 self.link = nil
                 streams = nil
+                self.webAuthn = nil
             }
-            return link
+            return (link, webAuthn)
         }
     }
 
     func streams(of id: Int) -> StreamSet? {
         lock.withLock { link?.id == id ? streams : nil }
+    }
+
+    func webAuthn(of id: Int) -> WebAuthnRelay? {
+        lock.withLock { link?.id == id ? webAuthn : nil }
     }
 }

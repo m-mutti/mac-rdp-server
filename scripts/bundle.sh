@@ -1,6 +1,6 @@
 #!/bin/bash
-# Wraps mac-rdp-connect in build/mac-rdp-connect.app so macOS privacy permissions
-# (Screen Recording, Accessibility) belong to mac-rdp-connect rather than to
+# Wraps mac-rdp-server in build/mac-rdp-server.app so macOS privacy permissions
+# (Screen Recording, Accessibility) belong to mac-rdp-server rather than to
 # whatever terminal or editor launched it.
 #
 #   SIGN_IDENTITY="Apple Development: ..." ./scripts/bundle.sh
@@ -13,20 +13,21 @@ cd "$(dirname "$0")/.."
 CONFIG="${CONFIG:-release}"
 swift build -c "$CONFIG"
 
-APP=build/mac-rdp-connect.app
+APP=build/mac-rdp-server.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp ".build/$CONFIG/mac-rdp-connect" "$APP/Contents/MacOS/"
+cp ".build/$CONFIG/mac-rdp-server" "$APP/Contents/MacOS/"
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key><string>io.github.m-mutti.mac-rdp-connect</string>
-    <key>CFBundleName</key><string>mac-rdp-connect</string>
-    <key>CFBundleExecutable</key><string>mac-rdp-connect</string>
+    <key>CFBundleIdentifier</key><string>io.github.m-mutti.mac-rdp-server</string>
+    <key>CFBundleName</key><string>mac-rdp-server</string>
+    <key>CFBundleDisplayName</key><string>mac-rdp-server</string>
+    <key>CFBundleExecutable</key><string>mac-rdp-server</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>

@@ -1,5 +1,5 @@
 import Foundation
-import MacRDPConnectKit
+import MacRDPKit
 
 /// The monitor streams of one session, reachable from FreeRDP threads
 /// (frame acknowledgements arrive there and must not wait for the main thread).
@@ -22,11 +22,13 @@ final class StreamSet: @unchecked Sendable {
 }
 
 /// Everything the Mac does for one connected client: virtual displays that
-/// match its monitors, a video stream per display, its cursor and input.
+/// match its monitors, a video stream per display, its cursor and input, and
+/// its devices.
 @MainActor
 final class HostSession {
     let link: SessionLink
     let streams: StreamSet
+    let webAuthn: WebAuthnRelay
     let injector: InputInjector
     private(set) var layout: MonitorLayout
     private let options: RDPHost.Options
@@ -42,12 +44,16 @@ final class HostSession {
     private var ended = false
     /// Reports why a session had to be closed, for display in the app.
     var onProblem: (String) -> Void = { _ in }
+    /// A `VirtualSecurityKey` (macOS 15+) while one exists.
+    private var virtualKey: AnyObject?
 
-    init(link: SessionLink, layout: MonitorLayout, options: RDPHost.Options, streams: StreamSet) {
+    init(link: SessionLink, layout: MonitorLayout, options: RDPHost.Options, streams: StreamSet,
+         webAuthn: WebAuthnRelay) {
         self.link = link
         self.layout = layout
         self.options = options
         self.streams = streams
+        self.webAuthn = webAuthn
         injector = InputInjector(modifierStyle: options.modifierStyle)
     }
 
@@ -84,10 +90,53 @@ final class HostSession {
 
     func end() async {
         ended = true
+        webAuthn.close()
+        virtualKey = nil
         await stopStreams()
         injector.releaseAll()
         displays.teardown()
         log("virtual displays removed")
+    }
+
+    // MARK: Security keys
+
+    /// The client accepted or refused WebAuthn redirection. When accepted, its
+    /// security keys and Windows Hello become a USB security key on the Mac.
+    func webAuthnAvailabilityChanged(_ available: Bool) async {
+        guard !ended else { return }
+        guard available else {
+            log("Windows does not forward security keys (WebAuthn redirection is off in Remote Desktop Connection)")
+            return
+        }
+        await checkWebAuthnChannel()
+        guard #available(macOS 15, *) else {
+            log("security keys from Windows need macOS 15 or later on the Mac")
+            return
+        }
+        let relay = webAuthn
+        do {
+            let key = try await VirtualSecurityKey(forward: { try await relay.exchange($0) })
+            guard !ended else { return }
+            virtualKey = key
+            log("security keys from Windows are available to Mac apps")
+        } catch VirtualSecurityKey.Failure.needsApproval {
+            log("security keys reach the Mac, but macOS won't create the virtual key without Apple's HID Virtual Device entitlement")
+        } catch {
+            log("could not create the virtual security key: \(error)")
+        }
+    }
+
+    /// Asks the client for its WebAuthn API version: proves the channel answers,
+    /// without involving the user.
+    private func checkWebAuthnChannel() async {
+        let request = RDPEWA.request(.apiVersion, transactionID: RDPEWA.newTransactionID())
+        do {
+            let (hresult, payload) = try RDPEWA.split(try await webAuthn.exchange(request))
+            let version = payload.prefix(4).reversed().reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+            log(hresult == 0 ? "Windows WebAuthn API version \(version)" : "Windows WebAuthn check failed (HRESULT 0x\(String(hresult, radix: 16)))")
+        } catch {
+            log("Windows WebAuthn check failed: \(error)")
+        }
     }
 
     private func drainLayoutQueue() async {
@@ -130,7 +179,7 @@ final class HostSession {
         } catch {
             for stream in started { await stream.stop() }
             fail("cannot capture the screen: \(error.localizedDescription)"
-                + " — allow mac-rdp-connect under System Settings › Privacy & Security › Screen & System Audio Recording")
+                + " — allow mac-rdp-server under System Settings › Privacy & Security › Screen & System Audio Recording")
             return
         }
         guard !ended else {

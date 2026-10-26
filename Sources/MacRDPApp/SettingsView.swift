@@ -1,4 +1,4 @@
-import MacRDPConnectKit
+import MacRDPKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -39,7 +39,7 @@ private struct ConnectionSettings: View {
                 Text(model.statusText).foregroundStyle(.secondary)
                 Spacer()
                 if model.isRunning {
-                    Button("Stop Server", action: model.stopServer)
+                    Button("Stop Server", action: model.stopServerByUser)
                 } else {
                     Button("Start Server", action: model.startServer)
                 }
