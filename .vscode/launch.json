@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:open_connect}",
+            "name": "Debug openconnect-host",
+            "target": "openconnect-host",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug openconnect-host"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:open_connect}",
+            "name": "Release openconnect-host",
+            "target": "openconnect-host",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release openconnect-host"
+        }
+    ]
+}

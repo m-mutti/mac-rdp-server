@@ -1,0 +1,18 @@
+# Toolchain built by scripts/bootstrap.sh (CMake, OpenSSL, FreeRDP)
+third_party/
+
+# Build output
+.build/
+build/
+*.o
+
+# SwiftPM / Xcode state
+.swiftpm/
+xcuserdata/
+DerivedData/
+
+# Generated Remote Desktop files (contain the Mac's address and user name)
+*.rdp
+
+# macOS
+.DS_Store
