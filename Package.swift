@@ -52,7 +52,16 @@ let package = Package(
             dependencies: ["MacRDPConnectKit", "CRDPServer"],
             linkerSettings: [.linkedFramework("AppKit")]
         ),
-        .executableTarget(name: "mac-rdp-connect", dependencies: ["MacRDPConnectKit", "MacRDPConnectServer"]),
+        // Menu bar app: onboarding, permission checks, sign-in and settings.
+        .target(
+            name: "MacRDPConnectUI",
+            dependencies: ["MacRDPConnectKit", "MacRDPConnectServer"],
+            linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("SwiftUI")]
+        ),
+        .executableTarget(
+            name: "mac-rdp-connect",
+            dependencies: ["MacRDPConnectKit", "MacRDPConnectServer", "MacRDPConnectUI"]
+        ),
         .testTarget(name: "MacRDPConnectKitTests", dependencies: ["MacRDPConnectKit"]),
     ]
 )

@@ -11,6 +11,14 @@ public struct HostError: Error, CustomStringConvertible {
     }
 }
 
+/// What the server reports to the app.
+public enum HostEvent: Sendable, Equatable {
+    case connected(client: String, monitors: Int)
+    case disconnected
+    /// A client was refused or a session had to close.
+    case problem(String)
+}
+
 /// The RDP server: accepts one client at a time and turns it into a
 /// `HostSession`. FreeRDP calls in from its own threads; anything touching
 /// displays or input hops to the main actor.
@@ -41,19 +49,9 @@ public final class RDPHost {
         guard mrc_ensure_certificate(directory.path, &error, error.count) == 0 else { throw HostError(error) }
     }
 
-    public nonisolated static func setPassword(_ password: String, user: String, directory: URL) throws {
-        try prepare(directory: directory)
-        var error = [CChar](repeating: 0, count: 256)
-        guard mrc_write_credentials(directory.path, user, password, &error, error.count) == 0 else {
-            throw HostError(error)
-        }
-    }
-
-    public nonisolated static func hasPassword(directory: URL) -> Bool {
-        FileManager.default.fileExists(atPath: directory.appendingPathComponent("users.sam").path)
-    }
-
     nonisolated let options: Options
+    /// Session changes and problems, delivered on the main actor.
+    public var onEvent: (HostEvent) -> Void = { _ in }
     private nonisolated let live = LiveSession()
     private var server: OpaquePointer?
     private var session: HostSession?
@@ -84,6 +82,11 @@ public final class RDPHost {
         server = nil
     }
 
+    /// Ends the current session, if any; the server keeps listening.
+    public func disconnectClient() {
+        session?.link.close()
+    }
+
     // MARK: Session lifecycle (FreeRDP threads)
 
     nonisolated func sessionStarted(_ handle: OpaquePointer, specs: [MonitorSpec], client: String) -> Bool {
@@ -91,13 +94,13 @@ public final class RDPHost {
         do {
             layout = try MonitorLayout(specs)
         } catch {
-            log("refused \(client): unusable monitor layout (\(error))")
+            refuse("refused \(client): unusable monitor layout (\(error))")
             return false
         }
         let link = SessionLink(handle)
         let streams = StreamSet()
         guard live.claim(link, streams: streams) else {
-            log("refused \(client): another session is active")
+            refuse("refused \(client): another session is active")
             return false
         }
         link.setMonitorCount(layout.monitors.count)
@@ -106,7 +109,9 @@ public final class RDPHost {
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
                 let session = HostSession(link: link, layout: layout, options: options, streams: streams)
+                session.onProblem = { [weak self] in self?.onEvent(.problem($0)) }
                 self.session = session
+                self.onEvent(.connected(client: client, monitors: layout.monitors.count))
                 Task { await session.begin() }
             }
         }
@@ -118,7 +123,15 @@ public final class RDPHost {
         link.detach()
         onSession(id) { host, session in
             host.session = nil
+            host.onEvent(.disconnected)
             Task { await session.end() }
+        }
+    }
+
+    nonisolated func refuse(_ message: String) {
+        log(message)
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { self.onEvent(.problem(message)) }
         }
     }
 

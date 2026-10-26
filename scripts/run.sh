@@ -1,7 +1,6 @@
 #!/bin/bash
-# Starts the RDP server as mac-rdp-connect.app, so macOS privacy permissions
-# belong to mac-rdp-connect rather than this terminal, and follows its log.
-# Extra arguments are passed to `serve`, e.g. ./scripts/run.sh --keys windowsShortcuts
+# Opens the mac-rdp-connect menu bar app (building it first if needed) and
+# follows its log. Permissions and settings are handled in the app.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -12,9 +11,8 @@ LOG="$HOME/Library/Logs/mac-rdp-connect.log"
 # permissions, so only build when there is no app yet.
 [[ -d "$APP" ]] || ./scripts/bundle.sh
 
-pkill -f "$APP/Contents/MacOS/mac-rdp-connect serve" 2>/dev/null || true
-: > "$LOG"
-open -n "$APP" --stdout "$LOG" --stderr "$LOG" --args serve "$@"
-echo "mac-rdp-connect started. Stop it with: pkill -f mac-rdp-connect"
-echo "Following $LOG (Ctrl-C stops following, not the server)"
+open "$APP"
+echo "mac-rdp-connect is running in the menu bar."
+echo "Following $LOG (Ctrl-C stops following, not the app)"
+touch "$LOG"
 exec tail -f "$LOG"

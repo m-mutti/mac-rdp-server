@@ -3,9 +3,12 @@ import CoreGraphics
 import Foundation
 import MacRDPConnectKit
 import MacRDPConnectServer
+import MacRDPConnectUI
 
 let usage = """
-usage: mac-rdp-connect <command> [options]
+usage: mac-rdp-connect [<command> [options]]
+
+Without a command (e.g. opened from Finder) it runs as a menu bar app.
 
 commands:
   serve [options]             run the RDP server (connect with Windows Remote Desktop)
@@ -129,26 +132,8 @@ func doctor() {
     }
 }
 
-/// The Mac's IPv4 address on its active network interface.
 func lanAddress() -> String? {
-    var list: UnsafeMutablePointer<ifaddrs>?
-    guard getifaddrs(&list) == 0 else { return nil }
-    defer { freeifaddrs(list) }
-    var candidates: [(name: String, address: String)] = []
-    for entry in sequence(first: list, next: { $0?.pointee.ifa_next }) {
-        guard let ifa = entry?.pointee, let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET),
-              ifa.ifa_flags & UInt32(IFF_UP | IFF_RUNNING) == UInt32(IFF_UP | IFF_RUNNING),
-              ifa.ifa_flags & UInt32(IFF_LOOPBACK) == 0 else { continue }
-        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        guard getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0
-        else { continue }
-        let name = String(decoding: ifa.ifa_name.withMemoryRebound(to: UInt8.self, capacity: Int(IFNAMSIZ)) {
-            UnsafeBufferPointer(start: $0, count: strlen(ifa.ifa_name)) }, as: UTF8.self)
-        let address = String(decoding: host.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-        candidates.append((name, address))
-    }
-    // Physical interfaces (en0 Ethernet, en1 Wi-Fi) beat VPN/bridge interfaces.
-    return (candidates.first { $0.name.hasPrefix("en") } ?? candidates.first)?.address
+    NetworkAddress.current().first?.address
 }
 
 func readPassword(_ prompt: String) -> String {
@@ -159,36 +144,6 @@ func readPassword(_ prompt: String) -> String {
     guard readpassphrase(prompt, &buffer, buffer.count, RPP_REQUIRE_TTY) != nil else { fail("cannot read password") }
     defer { buffer.withUnsafeMutableBufferPointer { _ = memset_s($0.baseAddress, $0.count, 0, $0.count) } }
     return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-}
-
-func rdpFile(address: String, port: UInt16, user: String) -> String {
-    let lines = [
-        "full address:s:\(address)\(port == 3389 ? "" : ":\(port)")",
-        "username:s:\(user)",
-        // Full screen across every monitor; each becomes a Mac display.
-        "screen mode id:i:2",
-        "use multimon:i:1",
-        "dynamic resolution:i:1",
-        "smart sizing:i:0",
-        "session bpp:i:32",
-        "connection type:i:7",
-        "networkautodetect:i:1",
-        "bandwidthautodetect:i:1",
-        "displayconnectionbar:i:1",
-        // Windows-key shortcuts go to the Mac while full screen.
-        "keyboardhook:i:2",
-        "redirectclipboard:i:1",
-        "redirectwebauthn:i:1",
-        "audiomode:i:0",
-        "audiocapturemode:i:1",
-        "autoreconnection enabled:i:1",
-        // The Mac uses a self-signed certificate: Windows asks once.
-        "authentication level:i:2",
-        "prompt for credentials:i:0",
-        "negotiate security layer:i:1",
-        "enablecredsspsupport:i:1",
-    ]
-    return lines.joined(separator: "\r\n") + "\r\n"
 }
 
 /// Holds for `seconds` while letting the main run loop service display callbacks.
@@ -202,7 +157,13 @@ setvbuf(stdout, nil, _IOLBF, 0)
 /// Ctrl-C / kill handlers for `serve`; global so they live as long as the process.
 var signalSources: [DispatchSourceSignal] = []
 
-let options = parseOptions(Array(CommandLine.arguments.dropFirst()))
+// Finder and `open` launch the app without a command (older macOS adds -psn_…).
+let arguments = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") }
+if arguments.isEmpty || arguments.first == "--show" {
+    MacRDPConnectApp.run(showing: arguments.dropFirst().first)
+}
+
+let options = parseOptions(Array(arguments))
 switch options.command {
 case "doctor":
     doctor()
@@ -251,19 +212,19 @@ case "record":
 
 case "set-password":
     let password = readPassword("Password for \(options.user) when connecting from Windows: ")
-    guard password.count >= 8 else { fail("use at least 8 characters") }
     if isatty(STDIN_FILENO) != 0, readPassword("Again: ") != password { fail("passwords did not match") }
-    try RDPHost.setPassword(password, user: options.user, directory: options.config)
+    try CredentialStore.save(user: options.user, password: password, directory: options.config)
     print("saved. Windows signs in as user \"\(options.user)\" with this password.")
 
 case "rdp-file":
     let address = require(options.address ?? lanAddress(), "cannot find this Mac's network address; pass --address")
     let path = options.out ?? "mac-rdp-connect.rdp"
-    try rdpFile(address: address, port: options.port, user: options.user).write(toFile: path, atomically: true, encoding: .utf8)
+    try RemoteDesktopFile.contents(address: address, port: options.port, user: options.user)
+        .write(toFile: path, atomically: true, encoding: .utf8)
     print("wrote \(path) for \(address) — copy it to the Windows PC and double-click it")
 
 case "serve":
-    guard RDPHost.hasPassword(directory: options.config) else {
+    guard CredentialStore.hasPassword(directory: options.config) else {
         fail("set the sign-in password first: mac-rdp-connect set-password")
     }
     try RDPHost.prepare(directory: options.config)

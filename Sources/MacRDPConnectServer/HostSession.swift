@@ -40,6 +40,8 @@ final class HostSession {
     private var reconfiguring = false
     private var queuedLayout: MonitorLayout?
     private var ended = false
+    /// Reports why a session had to be closed, for display in the app.
+    var onProblem: (String) -> Void = { _ in }
 
     init(link: SessionLink, layout: MonitorLayout, options: RDPHost.Options, streams: StreamSet) {
         self.link = link
@@ -54,8 +56,7 @@ final class HostSession {
         do {
             monitors = try await displays.apply(layout, scaling: options.scaling, physical: options.physical)
         } catch {
-            log("cannot create virtual displays: \(error)")
-            link.close()
+            fail("cannot create virtual displays: \(error)")
             reconfiguring = false
             return
         }
@@ -103,8 +104,7 @@ final class HostSession {
         do {
             monitors = try await displays.apply(new, scaling: options.scaling, physical: options.physical)
         } catch {
-            log("cannot create virtual displays: \(error)")
-            link.close()
+            fail("cannot create virtual displays: \(error)")
             return
         }
         layout = new
@@ -128,10 +128,9 @@ final class HostSession {
                 started.append(stream)
             }
         } catch {
-            log("cannot capture the screen: \(error.localizedDescription)"
-                + " — allow mac-rdp-connect under System Settings › Privacy & Security › Screen & System Audio Recording")
             for stream in started { await stream.stop() }
-            link.close()
+            fail("cannot capture the screen: \(error.localizedDescription)"
+                + " — allow mac-rdp-connect under System Settings › Privacy & Security › Screen & System Audio Recording")
             return
         }
         guard !ended else {
@@ -154,6 +153,12 @@ final class HostSession {
         for stream in streams.replace(with: []) {
             await stream.stop()
         }
+    }
+
+    private func fail(_ message: String) {
+        log(message)
+        onProblem(message)
+        link.close()
     }
 
     private func describeDisplays() {

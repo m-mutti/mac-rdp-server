@@ -54,27 +54,36 @@ then signed builds for the FIDO security key and webcam, a menu bar app, and lau
 
 ## Using it
 
-On the Mac:
+Open **mac-rdp-connect.app** (from the release DMG, or `./scripts/run.sh` after building).
+It lives in the menu bar; the first launch walks through setup:
 
-```sh
-./scripts/bootstrap.sh                                         # one-time toolchain build
-./scripts/bundle.sh                                            # builds build/mac-rdp-connect.app
-build/mac-rdp-connect.app/Contents/MacOS/mac-rdp-connect set-password
-./scripts/run.sh                                               # starts the server, follows the log
-```
+1. **Permissions:** Screen Recording (Windows sees the screen) and Accessibility (Windows'
+   keyboard and mouse control the Mac), each with live status and a button to open the right
+   System Settings pane. macOS applies Screen Recording after a restart, which the app offers.
+2. **Sign-in:** the user name and password Windows signs in with, separate from your Mac login.
+3. **Connect:** the addresses to use from Windows (local network and Tailscale), and a ready-made
+   `.rdp` file to copy to the PC.
 
-The first start asks for **Screen Recording** and **Accessibility** for mac-rdp-connect; allow both,
-then start it again. Until the app is signed with a developer certificate, every rebuild makes
-macOS forget these permissions.
+The menu bar panel shows whether Windows is connected, any permission or connection problem,
+the addresses to connect to, and Start/Stop, Disconnect, Settings and the log. **Settings** has:
 
-On Windows, either double-click the file from `mac-rdp-connect rdp-file`, or open
-Remote Desktop Connection, enter the Mac's address, tick *Display › Use all my monitors*,
-and sign in with your Mac user name and the mac-rdp-connect password.
+| Tab | What it does |
+|---|---|
+| Sign-in | Shows the user name and password (reveal, copy, generate) and changes them |
+| Permissions | The same live checks as setup |
+| Connection | Server status, port, addresses, `.rdp` file |
+| Display & Keyboard | Windows key or Ctrl as ⌘, scaling, mirroring the Mac's screen, compatibility video |
 
-Options for `serve` / `run.sh`: `--keys windowsShortcuts` (Ctrl acts as Command),
-`--physical extend`, `--scaling native`, `--h264 baseline` (if Windows connects but stays black).
-The log is `~/Library/Logs/mac-rdp-connect.log`; every 5 seconds it reports frames sent versus
-frames acknowledged by Windows.
+The password is stored as an NT hash for sign-in and, so Settings can show it, in your login
+Keychain. On Windows, open Remote Desktop Connection, enter the Mac's address, tick
+*Display › Use all my monitors*, and sign in. The log is `~/Library/Logs/mac-rdp-connect.log`;
+every 5 seconds it reports frames sent versus frames acknowledged by Windows.
+
+Until the app is signed with a developer certificate, every rebuild makes macOS forget its
+permissions and ask again before it reads the Keychain.
+
+The same binary also works headless: `mac-rdp-connect serve`, `set-password`, `rdp-file`,
+`doctor` (run it with no command for the app).
 
 ## Building
 
