@@ -88,7 +88,7 @@ public final class VirtualDisplayManager {
 
         // The displays work without the arrangement, so a failure here isn't fatal.
         do {
-            try configure(created,
+            try await configure(created,
                           origins: layout.macOrigins(policy: scaling),
                           primary: created[layout.primaryIndex].displayID,
                           physicalIDs: physicalIDs,
@@ -207,7 +207,11 @@ public final class VirtualDisplayManager {
                            origins: [CGPoint],
                            primary: CGDirectDisplayID,
                            physicalIDs: [CGDirectDisplayID],
-                           physical: PhysicalDisplayPolicy) throws {
+                           physical: PhysicalDisplayPolicy) async throws {
+        // macOS rearranges the remaining displays when a screen turns off, so
+        // that comes first, and the arrangement after.
+        if physical == .off { await turnOff(physicalIDs) }
+
         var config: CGDisplayConfigRef?
         var err = CGBeginDisplayConfiguration(&config)
         guard err == .success else { throw Failure.configuration(err) }
@@ -215,26 +219,15 @@ public final class VirtualDisplayManager {
         for (monitor, origin) in zip(monitors, origins) {
             CGConfigureDisplayOrigin(config, monitor.displayID, Int32(origin.x), Int32(origin.y))
         }
-        var disabling: [CGDirectDisplayID] = []
         switch physical {
-        case .off:
-            // An off screen stays off if this process dies, so only with a guard to turn it back on.
-            if let setEnabled = PhysicalScreens.setEnabled, !physicalIDs.isEmpty,
-               let screenGuard = ScreenGuard(screens: physicalIDs) {
-                self.screenGuard = screenGuard
-                for id in physicalIDs where setEnabled(config, id, false) == .success {
-                    disabling.append(id)
-                }
-            } else {
-                // Mirroring at least keeps every window where the client can see it.
-                for id in physicalIDs {
-                    CGConfigureDisplayMirrorOfDisplay(config, id, primary)
-                }
-            }
-        case .mirror:
+        case .off where disabledIDs.isEmpty, .mirror:
+            // Mirroring (also when screens couldn't be turned off) keeps every
+            // window where the client can see it.
             for id in physicalIDs {
                 CGConfigureDisplayMirrorOfDisplay(config, id, primary)
             }
+        case .off:
+            break
         case .extend:
             // Park the physical screens past the right edge of the virtual desk.
             var x = monitors.indices.map { i in
@@ -247,12 +240,32 @@ public final class VirtualDisplayManager {
         }
 
         err = CGCompleteDisplayConfiguration(config, .forAppOnly)
-        guard err == .success else {
-            screenGuard?.stop()
-            screenGuard = nil
-            throw Failure.configuration(err)
+        guard err == .success else { throw Failure.configuration(err) }
+    }
+
+    /// Turns the Mac's own screens off and waits until macOS has finished
+    /// with them. An off screen stays off if this process dies, so only with
+    /// a guard to turn it back on; without one, the screens stay on.
+    private func turnOff(_ ids: [CGDirectDisplayID]) async {
+        guard !ids.isEmpty, let setEnabled = PhysicalScreens.setEnabled,
+              let screenGuard = ScreenGuard(screens: ids) else { return }
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success else {
+            screenGuard.stop()
+            return
         }
-        disabledIDs = disabling
+        let off = ids.filter { setEnabled(config, $0, false) == .success }
+        guard !off.isEmpty, CGCompleteDisplayConfiguration(config, .forAppOnly) == .success else {
+            screenGuard.stop()
+            return
+        }
+        self.screenGuard = screenGuard
+        disabledIDs = off
+        for _ in 0..<40 where Self.onlineDisplays().contains(where: off.contains) {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        // The rearranging follows shortly after.
+        try? await Task.sleep(for: .milliseconds(300))
     }
 
     nonisolated static func onlineDisplays() -> [CGDirectDisplayID] {

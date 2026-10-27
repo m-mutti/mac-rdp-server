@@ -35,6 +35,30 @@ public enum KeyMap {
 
     public static let capsLock: CGKeyCode = 0x39
 
+    /// Flags a Mac keyboard sets on some keys by itself: fn on the arrows,
+    /// the navigation keys and F-keys, numeric pad on the arrows and keypad.
+    /// macOS's own shortcuts include them (Mission Control is ⌃ fn ↑), so
+    /// injected keys need them to match.
+    public static func intrinsicFlags(for code: CGKeyCode) -> CGEventFlags {
+        if arrows.contains(code) { return [.maskSecondaryFn, .maskNumericPad] }
+        if functionKeys.contains(code) { return .maskSecondaryFn }
+        if keypad.contains(code) { return .maskNumericPad }
+        return []
+    }
+
+    private static let arrows: Set<CGKeyCode> = [0x7B, 0x7C, 0x7D, 0x7E]
+    /// F1-F20, then Help, Home, Page Up, Forward Delete, End, Page Down.
+    private static let functionKeys: Set<CGKeyCode> = [
+        0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D,
+        0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A, 0x40, 0x4F, 0x50, 0x5A,
+        0x72, 0x73, 0x74, 0x75, 0x77, 0x79,
+    ]
+    /// Keypad 0-9, then . * + Clear / Enter - = and the JIS keypad comma.
+    private static let keypad: Set<CGKeyCode> = [
+        0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5B, 0x5C,
+        0x41, 0x43, 0x45, 0x47, 0x4B, 0x4C, 0x4E, 0x51, 0x5F,
+    ]
+
     enum Mac {
         static let command: CGKeyCode = 0x37
         static let rightCommand: CGKeyCode = 0x36

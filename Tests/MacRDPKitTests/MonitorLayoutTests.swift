@@ -62,6 +62,16 @@ struct KeyMapTests {
         #expect(KeyMap.macKeyCode(scancode: 0xFF, extended: false, style: .mac) == nil)
     }
 
+    @Test func keysCarryTheFlagsAMacKeyboardAdds() {
+        // Mission Control is stored as ⌃ fn ↑: without fn, an injected ⌃↑ doesn't trigger it.
+        #expect(KeyMap.intrinsicFlags(for: 0x7E) == [.maskSecondaryFn, .maskNumericPad]) // Up
+        #expect(KeyMap.intrinsicFlags(for: 0x67) == .maskSecondaryFn) // F11
+        #expect(KeyMap.intrinsicFlags(for: 0x73) == .maskSecondaryFn) // Home
+        #expect(KeyMap.intrinsicFlags(for: 0x5B) == .maskNumericPad) // keypad 8
+        #expect(KeyMap.intrinsicFlags(for: 0x00).isEmpty) // A
+        #expect(KeyMap.intrinsicFlags(for: KeyMap.Mac.control).isEmpty)
+    }
+
     @Test func modifierStyles() {
         let ctrl: UInt8 = 0x1D, win: UInt8 = 0x5B, alt: UInt8 = 0x38
         #expect(KeyMap.macKeyCode(scancode: win, extended: true, style: .mac) == KeyMap.Mac.command)

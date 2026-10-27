@@ -73,7 +73,7 @@ public final class InputInjector {
             capsLockOn.toggle()
             event.type = .flagsChanged
         }
-        event.flags = currentFlags
+        event.flags = currentFlags.union(KeyMap.intrinsicFlags(for: code))
         event.post(tap: .cghidEventTap)
     }
 
