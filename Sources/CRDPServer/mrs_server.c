@@ -38,6 +38,9 @@
 #define MRS_CERT_NAME "server"
 #define MRS_SAM_NAME "users.sam"
 #define MRS_MAX_POINTER 96
+// Frames remembered for timing their acknowledgements: more than can be in
+// flight, which is at most 15 per monitor (see FrameWindow.swift).
+#define MRS_SENT_HISTORY 256
 
 static void mrs_log(const char *fmt, ...) {
     char stamp[16];
@@ -94,6 +97,12 @@ typedef struct mrs_job {
     uint8_t data[];
 } mrs_job;
 
+typedef struct {
+    uint32_t frame_id;
+    uint64_t sent_at; // GetTickCount64; 0 once acknowledged
+    BOOL alone;       // nothing else was in flight
+} mrs_sent_frame;
+
 struct mrs_server {
     freerdp_listener *listener;
     rdpSettings *settings;
@@ -131,6 +140,7 @@ typedef struct {
     // Video statistics, logged periodically so a stalled client is visible.
     uint32_t stat_frames, stat_acks;
     uint64_t stat_bytes, stat_since;
+    mrs_sent_frame sent[MRS_SENT_HISTORY];
 
     // Shared with other threads, guarded by `lock`.
     BOOL lock_ready;
@@ -140,6 +150,8 @@ typedef struct {
     uint32_t last_frame_id;
     uint32_t last_acked_frame_id;
     BOOL acks_suspended;
+    // Milliseconds from sending a frame to its acknowledgement, smoothed.
+    double ack_delay, ack_delay_alone;
     HANDLE job_event;
 } mrs_peer;
 
@@ -304,11 +316,29 @@ static UINT mrs_gfx_caps_advertise(RdpgfxServerContext *gfx, const RDPGFX_CAPS_A
     return CHANNEL_RC_OK;
 }
 
+/// Running average that follows changes within about eight samples, like
+/// TCP's round-trip estimate. Zero means no samples yet.
+static void mrs_smooth(double *average, double sample) {
+    *average = *average == 0 ? sample : *average + (sample - *average) / 8;
+}
+
 static UINT mrs_gfx_frame_ack(RdpgfxServerContext *gfx, const RDPGFX_FRAME_ACKNOWLEDGE_PDU *ack) {
     mrs_peer *p = gfx->custom;
+    // The channel is serviced on the session thread, which also sends.
+    mrs_sent_frame *sent = &p->sent[ack->frameId % MRS_SENT_HISTORY];
+    double delay = -1;
+    if (sent->frame_id == ack->frameId && sent->sent_at != 0) {
+        delay = (double)(GetTickCount64() - sent->sent_at);
+        sent->sent_at = 0;
+    }
     pthread_mutex_lock(&p->lock);
     p->last_acked_frame_id = ack->frameId;
     p->acks_suspended = ack->queueDepth == SUSPEND_FRAME_ACKNOWLEDGEMENT;
+    if (delay >= 0) {
+        mrs_smooth(&p->ack_delay, delay);
+        if (sent->alone)
+            mrs_smooth(&p->ack_delay_alone, delay);
+    }
     pthread_mutex_unlock(&p->lock);
     p->stat_acks++;
     p->server->callbacks.frames_acked(p->server->callbacks.user, as_session(p));
@@ -339,8 +369,11 @@ static void mrs_send_frame(mrs_peer *p, const mrs_job *job) {
     };
 
     pthread_mutex_lock(&p->lock);
+    const BOOL alone = !p->acks_suspended && p->last_frame_id == p->last_acked_frame_id;
     const UINT32 frame_id = ++p->last_frame_id;
     pthread_mutex_unlock(&p->lock);
+    p->sent[frame_id % MRS_SENT_HISTORY] =
+        (mrs_sent_frame){.frame_id = frame_id, .sent_at = GetTickCount64(), .alone = alone};
 
     const RDPGFX_START_FRAME_PDU start = {.timestamp = mrs_timestamp(), .frameId = frame_id};
     const RDPGFX_END_FRAME_PDU end = {.frameId = frame_id};
@@ -361,9 +394,13 @@ static void mrs_report_stats(mrs_peer *p) {
     if (elapsed < 5000 || (p->stat_frames == 0 && p->stat_acks == 0))
         return;
     // Frames sent but never acknowledged mean the client cannot decode them.
-    mrs_log("video: %.1f fps sent, %.1f fps acknowledged, %.1f Mbit/s, %u in flight",
+    double delay = 0, alone = 0;
+    mrs_session_ack_delay(as_session(p), &alone, &delay);
+    mrs_log("video: %.1f fps sent, %.1f fps acknowledged, %.1f Mbit/s, %u in flight, "
+            "acknowledged in %.0f ms (%.0f ms alone)",
            p->stat_frames * 1000.0 / elapsed, p->stat_acks * 1000.0 / elapsed,
-           p->stat_bytes * 8.0 / 1000.0 / elapsed, mrs_session_frames_in_flight(as_session(p)));
+           p->stat_bytes * 8.0 / 1000.0 / elapsed, mrs_session_frames_in_flight(as_session(p)),
+           delay, alone);
     p->stat_frames = p->stat_acks = 0;
     p->stat_bytes = 0;
     p->stat_since = now;
@@ -665,6 +702,14 @@ uint32_t mrs_session_frames_in_flight(mrs_session *session) {
         n += p->last_frame_id - p->last_acked_frame_id;
     pthread_mutex_unlock(&p->lock);
     return n;
+}
+
+void mrs_session_ack_delay(mrs_session *session, double *alone, double *all) {
+    mrs_peer *p = as_peer(session);
+    pthread_mutex_lock(&p->lock);
+    *alone = p->ack_delay_alone;
+    *all = p->ack_delay;
+    pthread_mutex_unlock(&p->lock);
 }
 
 int mrs_session_set_pointer(mrs_session *session, const uint8_t *bgra, uint32_t width,

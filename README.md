@@ -25,8 +25,9 @@ the keyboard, mouse and other peripherals plugged into the PC.
   It works even if the Mac itself has a single screen.
 - **Your peripherals, connected to the Mac.** The keyboard and mouse on the PC work as if they
   were plugged into the Mac, and more peripherals are being added (see [Peripherals](#peripherals)).
-- **Smooth and sharp.** Hardware H.264 encoding on Apple silicon, frame pacing that keeps latency
-  low, and a cursor drawn on Windows so it never lags.
+- **Smooth and sharp.** Hardware H.264 encoding on Apple silicon, up to 60 fps per monitor with
+  frame pacing that adapts to the connection so latency stays low, and a cursor drawn on Windows
+  so it never lags.
 - **Secure.** Windows must prove the password before anything is shown (Network Level
   Authentication), over a connection encrypted with the Mac's own certificate.
 - **Simple.** A menu bar app with guided setup: permissions, password, and the address to

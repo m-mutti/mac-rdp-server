@@ -17,7 +17,7 @@ final class SessionLink: @unchecked Sendable {
     let id: Int
     private let lock = NSLock()
     private var handle: OpaquePointer?
-    private var maxInFlight: UInt32 = 3
+    private var monitorCount = 1
 
     init(_ handle: OpaquePointer) {
         id = Int(bitPattern: handle)
@@ -32,7 +32,11 @@ final class SessionLink: @unchecked Sendable {
     var hasCredit: Bool {
         lock.withLock {
             guard let handle else { return false }
-            return mrs_session_frames_in_flight(handle) < maxInFlight
+            var alone = 0.0, all = 0.0
+            mrs_session_ack_delay(handle, &alone, &all)
+            let limit = FrameWindow.limit(monitors: monitorCount, aloneDelay: .milliseconds(alone),
+                                          delay: .milliseconds(all))
+            return mrs_session_frames_in_flight(handle) < limit
         }
     }
 
@@ -65,8 +69,7 @@ final class SessionLink: @unchecked Sendable {
         let monitors = layout.monitors.map(mrs_monitor.init)
         lock.withLock {
             guard let handle else { return }
-            // A frame per monitor in flight plus a little slack keeps latency to ~1 frame.
-            maxInFlight = UInt32(layout.monitors.count + 2)
+            monitorCount = layout.monitors.count
             _ = monitors.withUnsafeBufferPointer {
                 mrs_session_reset_layout(handle, generation, $0.baseAddress, UInt32($0.count))
             }
@@ -74,7 +77,7 @@ final class SessionLink: @unchecked Sendable {
     }
 
     func setMonitorCount(_ count: Int) {
-        lock.withLock { maxInFlight = UInt32(count + 2) }
+        lock.withLock { monitorCount = count }
     }
 
     func sendWebAuthn(_ message: Data) {
