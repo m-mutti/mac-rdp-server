@@ -84,6 +84,7 @@ private struct DisplaySettings: View {
                     Text("One Mac point per Windows pixel").tag(ScalingPolicy.native)
                 }
                 Picker("Mac's own screen", selection: $draft.physical) {
+                    Text("Turn off, like a PC in Remote Desktop").tag(PhysicalDisplayPolicy.off)
                     Text("Mirror the main Windows monitor").tag(PhysicalDisplayPolicy.mirror)
                     Text("Keep as extra space").tag(PhysicalDisplayPolicy.extend)
                 }

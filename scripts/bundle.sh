@@ -5,7 +5,8 @@
 #
 #   SIGN_IDENTITY="Apple Development: ..." ./scripts/bundle.sh
 #
-# Without SIGN_IDENTITY the app is ad-hoc signed, and macOS forgets its
+# Without SIGN_IDENTITY it uses the identity from make-signing-identity.sh if
+# this Mac has one. Otherwise the app is ad-hoc signed, and macOS forgets its
 # permissions every time it is rebuilt.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -27,12 +28,19 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleDisplayName</key><string>mac-rdp-server</string>
     <key>CFBundleExecutable</key><string>mac-rdp-server</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.0</string>
-    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleShortVersionString</key><string>0.2.1</string>
+    <key>CFBundleVersion</key><string>3</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
 </dict>
 </plist>
 EOF
-codesign --force --sign "${SIGN_IDENTITY:--}" "$APP"
+LOCAL_KEYCHAIN="$HOME/Library/Keychains/mac-rdp-server-signing.keychain-db"
+LOCAL_PASSWORD="$HOME/Library/Application Support/mac-rdp-server-signing/keychain-password"
+if [ -z "${SIGN_IDENTITY:-}" ] && [ -f "$LOCAL_KEYCHAIN" ] && [ -f "$LOCAL_PASSWORD" ]; then
+    security unlock-keychain -p "$(cat "$LOCAL_PASSWORD")" "$LOCAL_KEYCHAIN"
+    codesign --force --keychain "$LOCAL_KEYCHAIN" --sign "mac-rdp-server Local Signing" "$APP"
+else
+    codesign --force --sign "${SIGN_IDENTITY:--}" "$APP"
+fi
 echo "$APP"

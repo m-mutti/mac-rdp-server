@@ -31,7 +31,7 @@ public final class RDPHost {
         public var bindAddress: String?
         public var configDirectory = RDPHost.defaultConfigDirectory
         public var scaling = ScalingPolicy.matchClient
-        public var physical = PhysicalDisplayPolicy.mirror
+        public var physical = PhysicalDisplayPolicy.off
         public var modifierStyle = ModifierStyle.mac
         public var h264Profile = H264Encoder.Settings.Profile.constrainedHigh
 
@@ -137,7 +137,11 @@ public final class RDPHost {
         onSession(id) { host, session in
             host.session = nil
             host.onEvent(.disconnected)
-            Task { await session.end() }
+            Task {
+                await session.end()
+                // The screen stays dark after the client leaves, unless another one just arrived.
+                if host.session == nil, host.options.physical == .off { ScreenWake.sleepNow() }
+            }
         }
     }
 

@@ -16,6 +16,9 @@ public struct VirtualMonitor: Sendable, Equatable {
 
 /// What to do with the Mac's own screens while a client is connected.
 public enum PhysicalDisplayPolicy: String, Sendable, CaseIterable {
+    /// Physical screens go dark, like a PC's while someone uses it over Remote
+    /// Desktop: nothing to see at the Mac, and nothing extra to draw.
+    case off
     /// Physical screens show the client's primary monitor, so no window can
     /// end up somewhere the remote user cannot see.
     case mirror
@@ -51,6 +54,13 @@ public final class VirtualDisplayManager {
     public private(set) var monitors: [VirtualMonitor] = []
     /// Which session the current displays belong to.
     public private(set) var owner: Int?
+    /// Physical screens turned off for the current displays, and the helper
+    /// that turns them back on if this process dies first.
+    private var disabledIDs: [CGDirectDisplayID] = []
+    private var screenGuard: ScreenGuard?
+    /// Why the last `apply` couldn't arrange the displays like the client's
+    /// monitors, leaving macOS's own arrangement; nil when it could.
+    public private(set) var arrangementProblem: Failure?
 
     public init() {}
 
@@ -67,7 +77,7 @@ public final class VirtualDisplayManager {
         var created: [VirtualMonitor] = []
         for index in layout.monitors.indices {
             let mode = layout.displayMode(for: index, policy: scaling)
-            let display = try makeDisplay(index: index, mode: mode, spec: layout.monitors[index])
+            let display = try await makeDisplay(index: index, mode: mode, spec: layout.monitors[index])
             displays.append(display)
             created.append(VirtualMonitor(index: index, displayID: display.displayID, mode: mode))
         }
@@ -76,11 +86,17 @@ public final class VirtualDisplayManager {
             try await waitUntilOnline(monitor.displayID)
         }
 
-        try configure(created,
-                      origins: layout.macOrigins(policy: scaling),
-                      primary: created[layout.primaryIndex].displayID,
-                      physicalIDs: physicalIDs,
-                      physical: physical)
+        // The displays work without the arrangement, so a failure here isn't fatal.
+        do {
+            try configure(created,
+                          origins: layout.macOrigins(policy: scaling),
+                          primary: created[layout.primaryIndex].displayID,
+                          physicalIDs: physicalIDs,
+                          physical: physical)
+            arrangementProblem = nil
+        } catch let failure as Failure {
+            arrangementProblem = failure
+        }
         monitors = created
         return created
     }
@@ -91,6 +107,10 @@ public final class VirtualDisplayManager {
     public func teardown(owner: Int? = nil) -> Bool {
         guard !displays.isEmpty, owner == nil || owner == self.owner else { return false }
         let virtualIDs = Set(displays.map(\.displayID))
+        // Screens first, so the Mac never runs out of displays.
+        PhysicalScreens.turnOn(disabledIDs)
+        screenGuard?.stop()
+        screenGuard = nil
         var config: CGDisplayConfigRef?
         if CGBeginDisplayConfiguration(&config) == .success {
             for id in Self.onlineDisplays() where !virtualIDs.contains(id) && CGDisplayIsInMirrorSet(id) != 0 {
@@ -100,28 +120,60 @@ public final class VirtualDisplayManager {
         }
         displays.removeAll()
         monitors.removeAll()
+        disabledIDs = []
         self.owner = nil
         return true
     }
 
-    /// Removes every display and waits until macOS has let go of them: until
-    /// then, displays with the same identity can't be created, and leftovers
-    /// would be mistaken for physical screens.
-    public func removeAll() async {
+    /// Like `teardown`, then waits until macOS has let go of the displays:
+    /// until then, displays with the same identity can't be created, and
+    /// leftovers would be mistaken for physical screens.
+    @discardableResult
+    public func remove(owner: Int? = nil) async -> Bool {
         let removed = Set(displays.map(\.displayID))
-        guard teardown() else { return }
+        guard teardown(owner: owner) else { return false }
         for _ in 0..<40 where Self.onlineDisplays().contains(where: removed.contains) {
             try? await Task.sleep(for: .milliseconds(50))
         }
+        return true
     }
 
-    private func makeDisplay(index: Int, mode: VirtualDisplayMode, spec: MonitorSpec) throws -> CGVirtualDisplay {
+    /// Removes every display, whoever it belongs to.
+    public func removeAll() async {
+        await remove()
+    }
+
+    /// Serial numbers each monitor's display may use. macOS refuses to create
+    /// a display whose identity is still taken, by a display it hasn't really
+    /// removed yet (it waits while its screens sleep) or by another copy of
+    /// this app; spares let a client connect anyway.
+    private static let serialOffsets: [UInt32] = [0, 0x100, 0x200, 0x300]
+
+    /// Creates the display for monitor `index` under the first identity macOS
+    /// accepts. If it accepts none, wake the screens and keep trying briefly.
+    private func makeDisplay(index: Int, mode: VirtualDisplayMode, spec: MonitorSpec) async throws -> CGVirtualDisplay {
+        for attempt in 0..<12 {
+            for offset in Self.serialOffsets {
+                if let display = try makeDisplay(index: index, serial: offset + UInt32(index + 1),
+                                                 mode: mode, spec: spec) {
+                    return display
+                }
+            }
+            if attempt == 0 { ScreenWake.wake(reason: "mac-rdp-server is setting up displays") }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        throw Failure.createFailed(monitor: index)
+    }
+
+    /// nil when macOS refuses to create the display.
+    private func makeDisplay(index: Int, serial: UInt32, mode: VirtualDisplayMode,
+                             spec: MonitorSpec) throws -> CGVirtualDisplay? {
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.queue = DispatchQueue.main
         descriptor.name = "mac-rdp-server display \(index + 1)"
         descriptor.vendorID = Self.vendorID
         descriptor.productID = 1
-        descriptor.serialNum = UInt32(index + 1)
+        descriptor.serialNum = serial
         descriptor.maxPixelsWide = UInt32(mode.pixelWidth)
         descriptor.maxPixelsHigh = UInt32(mode.pixelHeight)
         // Physical size drives the DPI macOS reports; derive it from the
@@ -131,9 +183,7 @@ public final class VirtualDisplayManager {
                                               height: Double(spec.height) / dpi * 25.4)
         descriptor.terminationHandler = { _, _ in }
 
-        guard let display = CGVirtualDisplay(descriptor: descriptor) else {
-            throw Failure.createFailed(monitor: index)
-        }
+        guard let display = CGVirtualDisplay(descriptor: descriptor) else { return nil }
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = mode.hiDPI ? 1 : 0
         settings.modes = [CGVirtualDisplayMode(width: UInt(mode.pointWidth),
@@ -165,7 +215,22 @@ public final class VirtualDisplayManager {
         for (monitor, origin) in zip(monitors, origins) {
             CGConfigureDisplayOrigin(config, monitor.displayID, Int32(origin.x), Int32(origin.y))
         }
+        var disabling: [CGDirectDisplayID] = []
         switch physical {
+        case .off:
+            // An off screen stays off if this process dies, so only with a guard to turn it back on.
+            if let setEnabled = PhysicalScreens.setEnabled, !physicalIDs.isEmpty,
+               let screenGuard = ScreenGuard(screens: physicalIDs) {
+                self.screenGuard = screenGuard
+                for id in physicalIDs where setEnabled(config, id, false) == .success {
+                    disabling.append(id)
+                }
+            } else {
+                // Mirroring at least keeps every window where the client can see it.
+                for id in physicalIDs {
+                    CGConfigureDisplayMirrorOfDisplay(config, id, primary)
+                }
+            }
         case .mirror:
             for id in physicalIDs {
                 CGConfigureDisplayMirrorOfDisplay(config, id, primary)
@@ -182,10 +247,15 @@ public final class VirtualDisplayManager {
         }
 
         err = CGCompleteDisplayConfiguration(config, .forAppOnly)
-        guard err == .success else { throw Failure.configuration(err) }
+        guard err == .success else {
+            screenGuard?.stop()
+            screenGuard = nil
+            throw Failure.configuration(err)
+        }
+        disabledIDs = disabling
     }
 
-    static func onlineDisplays() -> [CGDirectDisplayID] {
+    nonisolated static func onlineDisplays() -> [CGDirectDisplayID] {
         var count: UInt32 = 0
         CGGetOnlineDisplayList(0, nil, &count)
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))

@@ -48,6 +48,8 @@ final class HostSession {
     var onProblem: (String) -> Void = { _ in }
     /// A `VirtualSecurityKey` (macOS 15+) while one exists.
     private var virtualKey: AnyObject?
+    /// Keeps displays awake: macOS won't rearrange or remove them while they sleep.
+    private var screenWake: ScreenWake?
 
     init(link: SessionLink, layout: MonitorLayout, options: RDPHost.Options, streams: StreamSet,
          webAuthn: WebAuthnRelay, clipboard: ClipboardChannel, displays: VirtualDisplayManager) {
@@ -62,7 +64,10 @@ final class HostSession {
     }
 
     func begin() async {
+        guard !ended else { return }
         reconfiguring = true
+        screenWake = ScreenWake(reason: "Windows is connected to mac-rdp-server")
+        if await ScreenWake.waitUntilAwake() { log("woke the Mac's screen") }
         do {
             monitors = try await displays.apply(layout, scaling: options.scaling, physical: options.physical,
                                                 owner: link.id)
@@ -103,7 +108,10 @@ final class HostSession {
         virtualKey = nil
         await stopStreams()
         injector.releaseAll()
-        if displays.teardown(owner: link.id) { log("virtual displays removed") }
+        // While the screens are still kept on, or macOS would keep the displays.
+        if await displays.remove(owner: link.id) { log("virtual displays removed") }
+        screenWake?.release()
+        screenWake = nil
     }
 
     // MARK: Security keys
@@ -224,6 +232,9 @@ final class HostSession {
             let spec = layout.monitors[m.index]
             log("  monitor \(m.index + 1)\(spec.isPrimary ? " (primary)" : ""): \(spec.width)x\(spec.height) @\(spec.scalePercent)%"
                 + " -> Mac display \(m.displayID), looks like \(m.mode.pointWidth)x\(m.mode.pointHeight)\(m.mode.hiDPI ? " HiDPI" : "")")
+        }
+        if let problem = displays.arrangementProblem {
+            log("couldn't arrange the Mac displays like the Windows monitors (\(problem)); macOS placed them instead")
         }
     }
 }

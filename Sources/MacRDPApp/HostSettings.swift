@@ -10,7 +10,7 @@ struct HostSettings: Equatable {
     var port: UInt16 = 3389
     var keys = ModifierStyle.mac
     var scaling = ScalingPolicy.matchClient
-    var physical = PhysicalDisplayPolicy.mirror
+    var physical = PhysicalDisplayPolicy.off
     /// Baseline H.264 for clients that can't decode the default profile.
     var compatibilityVideo = false
 

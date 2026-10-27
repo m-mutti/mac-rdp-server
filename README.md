@@ -63,8 +63,9 @@ From then on mac-rdp-server lives in the menu bar, and its server runs whenever 
 4. Click **Connect**, sign in with the user name and password from setup, and accept the
    certificate prompt the first time.
 
-Every monitor fills with the Mac. To finish, close the Remote Desktop window; the Mac's own
-screen goes back to normal. **Save Remote Desktop File…** in the app creates a ready-made
+Every monitor fills with the Mac. While you're connected, the Mac's own screen is turned off, as
+a PC's is when you use it over Remote Desktop. To finish, close the Remote Desktop window; the
+Mac's screen stays asleep. **Save Remote Desktop File…** in the app creates a ready-made
 `.rdp` file you can copy to the PC and double-click instead.
 
 ## Peripherals
@@ -92,7 +93,7 @@ problem that needs attention. **Settings** has four tabs:
 | Sign-in | See the user name and password (show, copy, generate) and change them |
 | Permissions | Check Screen Recording, Accessibility and clipboard access, and fix them |
 | Connection | Start or stop the server, change the port, save a `.rdp` file |
-| Display & Keyboard | Windows key or Ctrl as ⌘, scaling, what the Mac's own screen shows |
+| Display & Keyboard | Windows key or Ctrl as ⌘, scaling, whether the Mac's own screen turns off, mirrors Windows or stays as extra space |
 
 ## Troubleshooting
 
@@ -116,8 +117,9 @@ problem that needs attention. **Settings** has four tabs:
 - One Windows connection at a time. A new connection takes over: the previous one is
   disconnected and the Mac's displays are rebuilt for the new PC's monitors.
 - The Mac must already be logged in; connecting to the login screen isn't supported yet.
-- Releases aren't signed or notarized yet. Until they are, macOS asks for permissions again
-  after each update.
+- Releases are signed with the project's own certificate but not notarized by Apple, so the
+  download needs the quarantine step above. Updates from 0.2.1 on keep the app's permissions;
+  updating from an earlier version asks for them once more.
 
 ## How it works
 
@@ -137,6 +139,7 @@ FreeRDP into `third_party/` without Homebrew or admin rights.
 
 ```sh
 ./scripts/bootstrap.sh   # one time
+./scripts/make-signing-identity.sh   # one time: lets rebuilds keep their permissions
 swift build
 ./scripts/test.sh        # tests
 ./scripts/bundle.sh      # builds build/mac-rdp-server.app

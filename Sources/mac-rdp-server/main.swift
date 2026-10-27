@@ -23,7 +23,7 @@ options:
   --bind A       listen only on address A      (default: all interfaces)
   --keys K       mac | windowsShortcuts        (default mac: Win key = Command)
   --scaling S    native | matchClient          (default matchClient)
-  --physical P   mirror | extend               (default mirror)
+  --physical P   off | mirror | extend         (default off)
   --h264 P       high | baseline               (default high; try baseline if Windows shows black)
   --address A    address Windows connects to   (default: this Mac's LAN address)
   --config DIR   settings directory            (default ~/Library/Application Support/mac-rdp-server)
@@ -36,7 +36,7 @@ struct Options {
     var command = ""
     var layout = "1920x1080"
     var scaling = ScalingPolicy.matchClient
-    var physical = PhysicalDisplayPolicy.mirror
+    var physical = PhysicalDisplayPolicy.off
     var seconds = 10.0
     var out: String?
     var port: UInt16 = 3389
@@ -161,6 +161,11 @@ var signalSources: [DispatchSourceSignal] = []
 let arguments = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") }
 if arguments.isEmpty || arguments.first == "--show" {
     MacRDPServerApp.run(showing: arguments.dropFirst().first)
+}
+
+// Started by the app while the Mac's screens are off; see ScreenGuard.
+if arguments.first == ScreenGuard.command {
+    ScreenGuard.run(Array(arguments.dropFirst()))
 }
 
 let options = parseOptions(Array(arguments))
