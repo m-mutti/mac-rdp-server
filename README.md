@@ -66,7 +66,7 @@ From then on mac-rdp-server lives in the menu bar, and its server runs whenever 
 
 Every monitor fills with the Mac. While you're connected, the Mac's own screen is turned off, as
 a PC's is when you use it over Remote Desktop. To finish, close the Remote Desktop window; the
-Mac's screen stays asleep. **Save Remote Desktop File…** in the app creates a ready-made
+Mac's screens come back on. **Save Remote Desktop File…** in the app creates a ready-made
 `.rdp` file you can copy to the PC and double-click instead.
 
 ## Peripherals

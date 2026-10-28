@@ -139,8 +139,11 @@ public final class RDPHost {
             host.onEvent(.disconnected)
             Task {
                 await session.end()
-                // The screen stays dark after the client leaves, unless another one just arrived.
-                if host.session == nil, host.options.physical == .off { ScreenWake.sleepNow() }
+                // The Mac's own screens are back on; light them up for whoever is at the
+                // Mac, unless another client just took over.
+                if host.session == nil, host.options.physical == .off {
+                    ScreenWake.wake(reason: "Remote Desktop session ended")
+                }
             }
         }
     }

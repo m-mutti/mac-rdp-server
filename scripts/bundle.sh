@@ -28,8 +28,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleDisplayName</key><string>mac-rdp-server</string>
     <key>CFBundleExecutable</key><string>mac-rdp-server</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.3</string>
-    <key>CFBundleVersion</key><string>5</string>
+    <key>CFBundleShortVersionString</key><string>0.2.4</string>
+    <key>CFBundleVersion</key><string>6</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
 </dict>

@@ -31,15 +31,6 @@ public final class ScreenWake {
         IOPMAssertionDeclareUserActivity(reason as CFString, kIOPMUserActiveLocal, &id)
     }
 
-    /// Puts the screens to sleep now, as `pmset displaysleepnow` does. macOS
-    /// then locks if it asks for the password when the display sleeps.
-    public static func sleepNow() {
-        let pmset = Process()
-        pmset.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        pmset.arguments = ["displaysleepnow"]
-        try? pmset.run()
-    }
-
     public static var anyAsleep: Bool {
         VirtualDisplayManager.onlineDisplays().contains { CGDisplayIsAsleep($0) != 0 }
     }
