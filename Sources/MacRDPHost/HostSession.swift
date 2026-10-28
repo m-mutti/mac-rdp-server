@@ -224,12 +224,17 @@ final class HostSession {
         var started: [MonitorStream] = []
         var failure: Error?
         do {
+            let discoveryStarted = ProcessInfo.processInfo.systemUptime
+            let available = try await DisplayCapture.discoverDisplays()
+            log("capture discovery: \(Int((ProcessInfo.processInfo.systemUptime - discoveryStarted) * 1000)) ms, "
+                + "shared across \(monitors.count) monitor(s)")
             for monitor in monitors {
+                guard !ended, revision == streamRevision else { break }
                 let stream = try MonitorStream(index: monitor.index, monitor: monitor,
                                                spec: specs[monitor.index],
                                                generation: generation, link: link,
                                                profile: options.h264Profile)
-                try await stream.start()
+                try await stream.start(displays: available)
                 started.append(stream)
             }
         } catch {

@@ -30,35 +30,68 @@ public enum AnnexB {
             format, parameterSetIndex: 0, parameterSetPointerOut: nil, parameterSetSizeOut: nil,
             parameterSetCountOut: &parameterSetCount, nalUnitHeaderLengthOut: &headerLength)
 
-        var out = Data()
-        if isKeyframe {
-            for ps in parameterSets(of: format) {
-                out.append(contentsOf: startCode)
-                out.append(ps)
-            }
-        }
+        guard let data = byteStream(from: block, nalHeaderLength: Int(headerLength),
+                                    parameterSets: isKeyframe ? parameterSets(of: format) : []) else { return nil }
+        return (data, isKeyframe)
+    }
 
-        var avcc = Data(count: block.dataLength)
-        let copied = avcc.withUnsafeMutableBytes { raw in
+    /// CoreMedia normally supplies a contiguous encoded block. Read it in
+    /// place while the block is retained; copy only for fragmented buffers.
+    static func byteStream(from block: CMBlockBuffer, nalHeaderLength: Int,
+                           parameterSets: [Data] = []) -> Data? {
+        guard (1...4).contains(nalHeaderLength), block.dataLength > 0 else { return nil }
+        var pointer: UnsafeMutablePointer<Int8>?
+        var contiguous = 0, total = 0
+        let status = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: &contiguous,
+                                                totalLengthOut: &total, dataPointerOut: &pointer)
+        if status == kCMBlockBufferNoErr, contiguous >= block.dataLength, let pointer {
+            return convert(UnsafeRawBufferPointer(start: pointer, count: block.dataLength),
+                           headerLength: nalHeaderLength, parameterSets: parameterSets)
+        }
+        var copied = Data(count: block.dataLength)
+        let copiedStatus = copied.withUnsafeMutableBytes { raw in
             CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: block.dataLength,
                                        destination: raw.baseAddress!)
         }
-        guard copied == kCMBlockBufferNoErr else { return nil }
+        guard copiedStatus == kCMBlockBufferNoErr else { return nil }
+        return copied.withUnsafeBytes { convert($0, headerLength: nalHeaderLength, parameterSets: parameterSets) }
+    }
 
-        var offset = 0
-        let length = Int(headerLength)
-        while offset + length <= avcc.count {
-            var nalSize = 0
-            for i in 0..<length {
-                nalSize = (nalSize << 8) | Int(avcc[avcc.startIndex + offset + i])
-            }
-            offset += length
-            guard nalSize > 0, offset + nalSize <= avcc.count else { return nil }
-            out.append(contentsOf: startCode)
-            out.append(avcc[(avcc.startIndex + offset)..<(avcc.startIndex + offset + nalSize)])
-            offset += nalSize
+    private static func convert(_ raw: UnsafeRawBufferPointer, headerLength: Int,
+                                parameterSets: [Data]) -> Data? {
+        let bytes = raw.bindMemory(to: UInt8.self)
+        func nalSize(at offset: Int) -> Int {
+            var size = 0
+            for i in 0..<headerLength { size = size << 8 | Int(bytes[offset + i]) }
+            return size
         }
-        return (out, isKeyframe)
+        // Validate first and reserve exactly once, including short AVCC headers
+        // that expand to four-byte start codes. No per-NAL Data slices are made.
+        var outputSize = parameterSets.reduce(0) { $0 + 4 + $1.count }
+        var offset = 0
+        while offset < bytes.count {
+            guard bytes.count - offset >= headerLength else { return nil }
+            let size = nalSize(at: offset)
+            offset += headerLength
+            guard size > 0, size <= bytes.count - offset else { return nil }
+            outputSize += 4 + size
+            offset += size
+        }
+        var out = Data()
+        out.reserveCapacity(outputSize)
+        for ps in parameterSets {
+            out.append(contentsOf: startCode)
+            out.append(ps)
+        }
+        offset = 0
+        while offset < bytes.count {
+            let size = nalSize(at: offset)
+            offset += headerLength
+            out.append(contentsOf: startCode)
+            out.append(bytes.baseAddress!.advanced(by: offset), count: size)
+            offset += size
+        }
+        return out
     }
 
     public static func parameterSets(of format: CMFormatDescription) -> [Data] {

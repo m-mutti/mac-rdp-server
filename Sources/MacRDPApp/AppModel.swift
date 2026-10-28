@@ -139,10 +139,15 @@ final class AppModel {
         host?.disconnectClient()
     }
 
-    /// Saves new settings; a running server restarts to use them.
+    /// Video quality retunes live; other settings restart a running server.
     func apply(_ new: HostSettings) {
+        let needsRestart = new.requiresServerRestart(comparedTo: settings)
         settings = new
         new.save(to: defaults)
+        if !needsRestart {
+            host?.setVideoQuality(new.videoQuality)
+            return
+        }
         if host != nil {
             stopServer()
             startServer()

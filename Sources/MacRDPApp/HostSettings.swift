@@ -13,10 +13,12 @@ struct HostSettings: Equatable {
     var physical = PhysicalDisplayPolicy.off
     /// Baseline H.264 for clients that can't decode the default profile.
     var compatibilityVideo = false
+    var videoQuality = VideoQuality.balanced
 
     private enum Key {
         static let port = "port", keys = "keys", scaling = "scaling", physical = "physical"
         static let compatibilityVideo = "compatibilityVideo"
+        static let videoQuality = "videoQuality"
     }
 
     static func load(from defaults: UserDefaults = .standard) -> HostSettings {
@@ -28,6 +30,7 @@ struct HostSettings: Equatable {
         s.scaling = defaults.string(forKey: Key.scaling).flatMap(ScalingPolicy.init) ?? s.scaling
         s.physical = defaults.string(forKey: Key.physical).flatMap(PhysicalDisplayPolicy.init) ?? s.physical
         s.compatibilityVideo = defaults.bool(forKey: Key.compatibilityVideo)
+        s.videoQuality = defaults.string(forKey: Key.videoQuality).flatMap(VideoQuality.init) ?? .balanced
         return s
     }
 
@@ -37,6 +40,13 @@ struct HostSettings: Equatable {
         defaults.set(scaling.rawValue, forKey: Key.scaling)
         defaults.set(physical.rawValue, forKey: Key.physical)
         defaults.set(compatibilityVideo, forKey: Key.compatibilityVideo)
+        defaults.set(videoQuality.rawValue, forKey: Key.videoQuality)
+    }
+
+    func requiresServerRestart(comparedTo previous: HostSettings) -> Bool {
+        var other = self
+        other.videoQuality = previous.videoQuality
+        return other != previous
     }
 
     var options: RDPHost.Options {
@@ -46,6 +56,7 @@ struct HostSettings: Equatable {
         o.scaling = scaling
         o.physical = physical
         o.h264Profile = compatibilityVideo ? .constrainedBaseline : .constrainedHigh
+        o.videoQuality = videoQuality
         return o
     }
 }

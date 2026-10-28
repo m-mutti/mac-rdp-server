@@ -2,6 +2,28 @@ import Testing
 @testable import MacRDPKit
 
 struct VideoPacingTests {
+    @Test func sharperRaisesTheBudgetWhilePreservingCongestionControl() {
+        var pacing = VideoPacing()
+        let balanced = pacing.bitrate(pixels: 1920 * 1080, monitors: 2)
+        pacing.preset = .sharper
+        let sharper = pacing.bitrate(pixels: 1920 * 1080, monitors: 2)
+        #expect(sharper > balanced)
+        for monitors in [1, 2, 4, 8, 16] {
+            #expect(pacing.bitrate(pixels: 3840 * 2160, monitors: monitors) * monitors <=
+                    VideoQuality.sharper.sessionBitrateLimit)
+        }
+        for second in 1...12 {
+            pacing.update(now: Double(second), baselineMS: 55, delayMS: 300,
+                          bytesInFlight: 300_000, byteLimit: 350_000,
+                          acknowledgements: UInt64(second))
+        }
+        #expect(pacing.bitrate(pixels: 1920 * 1080, monitors: 2) < sharper)
+        #expect(pacing.frameRate == 60)
+        let factor = pacing.quality
+        pacing.preset = .balanced
+        #expect(pacing.quality == factor)
+    }
+
     @Test func sustainedBytePressureReducesBitrateWithoutReducingMotionRate() {
         var pacing = VideoPacing()
         let original = pacing.bitrate(pixels: 1920 * 1080, monitors: 2)

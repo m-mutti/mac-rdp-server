@@ -53,7 +53,9 @@ final class MonitorStream: @unchecked Sendable {
             })
     }
 
-    func start() async throws { try await capture?.start() }
+    func start(displays: DisplayCapture.Displays) async throws {
+        try await capture?.start(displays: displays)
+    }
 
     func stop() async {
         lock.withLock {

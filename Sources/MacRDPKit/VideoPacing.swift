@@ -1,8 +1,15 @@
 import Foundation
 
+public enum VideoQuality: String, CaseIterable, Sendable {
+    case balanced, sharper
+
+    public var sessionBitrateLimit: Int { self == .sharper ? 32_000_000 : 20_000_000 }
+}
+
 /// Keep motion at 60 Hz. Reduce bitrate only when fresh acknowledgements and
 /// sustained byte pressure agree that a queue is growing, not for RTT jitter.
 public struct VideoPacing: Sendable {
+    public var preset: VideoQuality = .balanced
     public private(set) var quality = 1.0
     public let frameRate = 60
     private var lastUpdate = 0.0
@@ -75,8 +82,10 @@ public struct VideoPacing: Sendable {
 
     /// Bounds aggregate bitrate even when many displays animate at once.
     public func bitrate(pixels: Int, monitors: Int) -> Int {
-        let ceiling = min(max(pixels * 4, 4_000_000), 12_000_000)
-        let share = min(ceiling, 20_000_000 / max(1, monitors))
+        let ceiling = preset == .sharper
+            ? min(max(pixels * 8, 6_000_000), 20_000_000)
+            : min(max(pixels * 4, 4_000_000), 12_000_000)
+        let share = min(ceiling, preset.sessionBitrateLimit / max(1, monitors))
         return max(500_000, Int(Double(share) * quality))
     }
 }

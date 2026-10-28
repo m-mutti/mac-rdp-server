@@ -34,6 +34,7 @@ public final class RDPHost {
         public var physical = PhysicalDisplayPolicy.off
         public var modifierStyle = ModifierStyle.mac
         public var h264Profile = H264Encoder.Settings.Profile.constrainedHigh
+        public var videoQuality = VideoQuality.balanced
 
         public init() {}
     }
@@ -53,13 +54,14 @@ public final class RDPHost {
     nonisolated let options: Options
     /// Session changes and problems, delivered on the main actor.
     public var onEvent: (HostEvent) -> Void = { _ in }
-    nonisolated let live = LiveSession()
+    nonisolated let live: LiveSession
     private var server: OpaquePointer?
     private var session: HostSession?
     private let displays = VirtualDisplayManager()
 
     public init(options: Options) {
         self.options = options
+        live = LiveSession(videoQuality: options.videoQuality)
     }
 
     public func start() throws {
@@ -87,6 +89,11 @@ public final class RDPHost {
     /// Ends the current session, if any; the server keeps listening.
     public func disconnectClient() {
         session?.link.close()
+    }
+
+    /// Retunes the active session without disconnecting Windows.
+    public func setVideoQuality(_ quality: VideoQuality) {
+        live.setVideoQuality(quality)
     }
 
 
@@ -166,9 +173,15 @@ public final class RDPHost {
     }
 
     nonisolated func deliver(_ events: [RDPInputEvent], to id: Int) {
-        guard !events.isEmpty, live.isCurrent(id) else { return }
+        guard !events.isEmpty, let input = live.input(of: id), input.append(events) else { return }
+        drainInput(input, to: id)
+    }
+
+    private nonisolated func drainInput(_ input: PendingInput, to id: Int) {
         onSession(id) { _, session in
-            for event in events { session.injector.apply(event) }
+            let batch = input.take()
+            for event in batch.events { session.injector.apply(event) }
+            if batch.more { self.drainInput(input, to: id) }
         }
     }
 
@@ -266,6 +279,7 @@ final class LiveSession: @unchecked Sendable {
         let streams = StreamSet()
         let webAuthn: WebAuthnRelay
         let clipboard: ClipboardChannel
+        let input = PendingInput()
 
         init(link: SessionLink) {
             self.link = link
@@ -277,11 +291,28 @@ final class LiveSession: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [Int: Entry] = [:]
     private var current: Int?
+    private var videoQuality: VideoQuality
+
+    init(videoQuality: VideoQuality = .balanced) {
+        self.videoQuality = videoQuality
+    }
+
+    func setVideoQuality(_ quality: VideoQuality) {
+        lock.withLock {
+            videoQuality = quality
+            if let current { entries[current]?.link.setVideoQuality(quality) }
+        }
+    }
+
+    func input(of id: Int) -> PendingInput? {
+        lock.withLock { current == id ? entries[id]?.input : nil }
+    }
 
     /// Makes `entry` the active session; returns the one it replaces.
     func claim(_ entry: Entry) -> Entry? {
         lock.withLock {
             let previous = current.flatMap { entries[$0] }
+            entry.link.setVideoQuality(videoQuality)
             entries[entry.link.id] = entry
             current = entry.link.id
             return previous

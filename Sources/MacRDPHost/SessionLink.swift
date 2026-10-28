@@ -37,6 +37,13 @@ final class SessionLink: @unchecked Sendable {
         lock.withLock { handle = nil }
     }
 
+    func setVideoQuality(_ quality: VideoQuality) {
+        lock.withLock {
+            pacing.preset = quality
+            lastPacingLog = 0
+        }
+    }
+
     /// Reserve credit before encoding, so concurrent monitors cannot all
     /// spend the same slot. Already encoded reference frames are never dropped.
     func reserveVideo(pixels: Int) -> VideoBudget? {
@@ -46,7 +53,7 @@ final class SessionLink: @unchecked Sendable {
             mrs_session_get_video_state(handle, &state)
             let now = ProcessInfo.processInfo.systemUptime
             let bitrate = pacing.bitrate(pixels: pixels, monitors: monitorCount)
-            let aggregate = min(20_000_000, bitrate * monitorCount)
+            let aggregate = min(pacing.preset.sessionBitrateLimit, bitrate * monitorCount)
             let byteLimit = pacing.byteLimit(monitors: monitorCount, baselineMS: state.baseline_ms,
                                              aggregateBitrate: aggregate, now: now)
             let bytes = Int(state.bytes) + reservations.values.reduce(0, +)
@@ -57,7 +64,7 @@ final class SessionLink: @unchecked Sendable {
                                           delay: .milliseconds(state.delay_ms), frameRate: pacing.frameRate)
             if now - lastPacingLog >= 5 {
                 lastPacingLog = now
-                log("pacing: target \(pacing.frameRate) fps/monitor, quality \(Int(pacing.quality * 100))%, "
+                log("pacing: \(pacing.preset.rawValue), target \(pacing.frameRate) fps/monitor, quality \(Int(pacing.quality * 100))%, "
                     + "\(bytes)/\(byteLimit) video bytes outstanding, \(limit) frame slots")
             }
             guard Int(state.frames) + reservations.count < limit, bytes < byteLimit else { return nil }

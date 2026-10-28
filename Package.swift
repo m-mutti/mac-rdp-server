@@ -67,5 +67,6 @@ let package = Package(
             dependencies: ["MacRDPKit", "MacRDPHost", "MacRDPApp"]
         ),
         .testTarget(name: "MacRDPKitTests", dependencies: ["MacRDPKit"]),
+        .testTarget(name: "MacRDPHostTests", dependencies: ["MacRDPHost", "MacRDPApp"]),
     ]
 )

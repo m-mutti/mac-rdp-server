@@ -94,7 +94,11 @@ problem that needs attention. **Settings** has four tabs:
 | Sign-in | See the user name and password (show, copy, generate) and change them |
 | Permissions | Check Screen Recording, Accessibility and clipboard access, and fix them |
 | Connection | Start or stop the server, change the port, save a `.rdp` file |
-| Display & Keyboard | Windows key or Ctrl as ⌘, scaling, whether the Mac's own screen turns off, mirrors Windows or stays as extra space |
+| Display & Keyboard | Windows key or Ctrl as ⌘, scaling, video quality, whether the Mac's own screen turns off, mirrors Windows or stays as extra space |
+
+Video quality defaults to **Balanced**. Choose **Sharper** to allow more bandwidth for a clearer
+picture. Changing only video quality applies immediately without disconnecting Windows; both
+settings keep adaptive bitrate and frame pacing active.
 
 ## Troubleshooting
 

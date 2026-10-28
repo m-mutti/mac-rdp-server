@@ -83,6 +83,10 @@ private struct DisplaySettings: View {
                     Text("Match Windows scaling (sharp, Retina-style)").tag(ScalingPolicy.matchClient)
                     Text("One Mac point per Windows pixel").tag(ScalingPolicy.native)
                 }
+                Picker("Video quality", selection: $draft.videoQuality) {
+                    Text("Balanced").tag(VideoQuality.balanced)
+                    Text("Sharper (uses more bandwidth)").tag(VideoQuality.sharper)
+                }
                 Picker("Mac's own screen", selection: $draft.physical) {
                     Text("Turn off, like a PC in Remote Desktop").tag(PhysicalDisplayPolicy.off)
                     Text("Mirror the main Windows monitor").tag(PhysicalDisplayPolicy.mirror)
@@ -92,7 +96,9 @@ private struct DisplaySettings: View {
             }
             HStack {
                 if case .connected = model.serverState, draft != model.settings {
-                    Text("Applying restarts the server and disconnects Windows.")
+                    Text(draft.requiresServerRestart(comparedTo: model.settings)
+                         ? "Applying restarts the server and disconnects Windows."
+                         : "Video quality applies without disconnecting Windows.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }

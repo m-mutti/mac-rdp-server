@@ -6,6 +6,17 @@ import ScreenCaptureKit
 /// Streams one display's pixels with ScreenCaptureKit. Frames arrive only
 /// when something on screen changes, so an idle desktop costs nothing.
 public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    /// Immutable discovery snapshot shared only for one stream startup group.
+    /// Refresh it after every layout change; never cache it across sessions.
+    public struct Displays: @unchecked Sendable {
+        fileprivate let values: [SCDisplay]
+    }
+
+    public static func discoverDisplays() async throws -> Displays {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        return Displays(values: content.displays)
+    }
+
     public struct Frame: @unchecked Sendable {
         /// NV12 (420v), BT.709 — the encoder's native input, no conversion.
         public let pixelBuffer: CVPixelBuffer
@@ -45,9 +56,11 @@ public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @
         self.onStop = onStop
     }
 
-    public func start() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+    public func start(displays: Displays? = nil) async throws {
+        let available: Displays
+        if let displays { available = displays }
+        else { available = try await Self.discoverDisplays() }
+        guard let display = available.values.first(where: { $0.displayID == displayID }) else {
             throw Failure.displayNotShareable(displayID)
         }
         let filter = SCContentFilter(display: display, excludingWindows: [])
