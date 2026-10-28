@@ -103,6 +103,17 @@ public final class H264Encoder: @unchecked Sendable {
         needsKeyframe.withLock { $0 = true }
     }
 
+    /// Called on the stream's serial encoding queue, between submissions.
+    /// A failed optional retune keeps the previous working encoder settings.
+    @discardableResult
+    public func setBitrate(_ bitrate: Int, frameRate: Int) -> Bool {
+        let rate = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+                                       value: bitrate as CFNumber)
+        let fps = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                                      value: frameRate as CFNumber)
+        return rate == noErr && fps == noErr
+    }
+
     public func encode(_ pixelBuffer: CVPixelBuffer, at time: CMTime) {
         let forceKeyframe = needsKeyframe.withLock { pending in
             defer { pending = false }

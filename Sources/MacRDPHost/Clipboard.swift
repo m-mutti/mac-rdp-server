@@ -17,6 +17,39 @@ final class ClipboardChannel: @unchecked Sendable {
     private var staleAnswers = 0
     private var closed = false
     private let reads = DispatchQueue(label: "mac-rdp-server.clipboard", qos: .userInitiated)
+    private let fetches = DispatchQueue(label: "mac-rdp-server.clipboard-fetch", qos: .userInitiated)
+    private var fetchGeneration = UUID()
+
+    struct RemoteFormat: Sendable {
+        let type: String
+        let id: UInt32
+        let kind: WindowsClipboard.Kind
+    }
+
+    /// Fetch in wire order on a worker. Publish text first, then enrich it with
+    /// other formats; AppKit never waits for network data in a paste callback.
+    func prefetch(_ formats: [RemoteFormat],
+                  receive: @escaping @Sendable (String, Data) -> Void) {
+        let generation = UUID()
+        lock.withLock { fetchGeneration = generation }
+        fetches.async { [self] in
+            for format in formats {
+                guard lock.withLock({ !closed && fetchGeneration == generation }) else { return }
+                guard let raw = fetch(format.id, timeout: 3) else { return }
+                guard lock.withLock({ !closed && fetchGeneration == generation }) else { return }
+                let converted: Data?
+                switch format.kind {
+                case .text:
+                    converted = WindowsClipboard.text(fromUnicode: raw)?.data(using: .utf8)
+                case .html:
+                    converted = WindowsClipboard.html(fromHTMLFormat: raw)?.data(using: .utf8)
+                case .bitmap: converted = WindowsClipboard.png(fromDIB: raw)
+                case .rtf, .png: converted = raw
+                }
+                if let converted { receive(format.type, converted) }
+            }
+        }
+    }
 
     init(link: SessionLink) {
         self.link = link
@@ -40,7 +73,7 @@ final class ClipboardChannel: @unchecked Sendable {
     }
 
     /// Waits for Windows' clipboard in format `id`; nil if it fails or takes longer than `timeout`.
-    func fetch(_ id: UInt32, timeout: TimeInterval) -> Data? {
+    private func fetch(_ id: UInt32, timeout: TimeInterval) -> Data? {
         let semaphore = DispatchSemaphore(value: 0)
         let ready = lock.withLock {
             guard !closed else { return false }
@@ -48,7 +81,11 @@ final class ClipboardChannel: @unchecked Sendable {
             answer = nil
             return true
         }
-        guard ready, link.clipboardFetch(id) else { return nil }
+        guard ready else { return nil }
+        guard link.clipboardFetch(id) else {
+            lock.withLock { waiter = nil }
+            return nil
+        }
         let answered = semaphore.wait(timeout: .now() + timeout) == .success
         return lock.withLock {
             defer {
@@ -93,10 +130,10 @@ final class ClipboardChannel: @unchecked Sendable {
 }
 
 /// Keeps the Mac and Windows clipboards in step while a session is active:
-/// text, formatted text and images, both ways. Data only crosses the network
-/// when someone actually pastes.
+/// text, formatted text and images, both ways. Windows data is prefetched
+/// so an AppKit paste callback never waits for a network response.
 @MainActor
-final class ClipboardSync: NSObject, NSPasteboardItemDataProvider {
+final class ClipboardSync: NSObject {
     /// IDs for the registered formats we offer (Windows wants 0xC000 and up).
     private enum Registered {
         static let html: UInt32 = 0xC001
@@ -109,8 +146,9 @@ final class ClipboardSync: NSObject, NSPasteboardItemDataProvider {
     private var seenChange = NSPasteboard.general.changeCount
     /// The change count of our own last write, which must not be offered back.
     private var ownChange: Int?
-    /// Windows' format for each type promised on the Mac clipboard.
-    private var promised: [NSPasteboard.PasteboardType: (id: UInt32, kind: WindowsClipboard.Kind)] = [:]
+    private var incomingGeneration = UUID()
+    private var incomingData: [NSPasteboard.PasteboardType: Data] = [:]
+    private var stopped = false
 
     init(channel: ClipboardChannel) {
         self.channel = channel
@@ -119,6 +157,7 @@ final class ClipboardSync: NSObject, NSPasteboardItemDataProvider {
     /// The client shares its clipboard: offer what the Mac holds and keep watching.
     func start() {
         guard timer == nil else { return }
+        stopped = false
         log("sharing the clipboard")
         offerMacClipboard()
         // macOS has no clipboard change notification.
@@ -132,49 +171,65 @@ final class ClipboardSync: NSObject, NSPasteboardItemDataProvider {
     }
 
     func stop() {
+        stopped = true
+        incomingGeneration = UUID()
         timer?.cancel()
         timer = nil
         channel.close()
     }
 
-    /// Windows copied something: promise it on the Mac clipboard, fetched on paste.
+    /// Publish each cached format only while this remote copy is current and
+    /// the Mac clipboard hasn't been changed locally in the meantime.
     func windowsOffered(_ formats: [(id: UInt32, name: String?)]) {
+        incomingGeneration = UUID()
+        let generation = incomingGeneration
+        incomingData = [:]
         func named(_ name: String) -> UInt32? { formats.first { $0.name == name }?.id }
         func standard(_ id: UInt32) -> UInt32? { formats.contains { $0.id == id } ? id : nil }
-
-        var promised: [NSPasteboard.PasteboardType: (id: UInt32, kind: WindowsClipboard.Kind)] = [:]
-        if let id = standard(WindowsClipboard.unicodeText) { promised[.string] = (id, .text) }
-        if let id = named(WindowsClipboard.htmlName) { promised[.html] = (id, .html) }
-        if let id = named(WindowsClipboard.rtfName) { promised[.rtf] = (id, .rtf) }
-        if let id = named(WindowsClipboard.pngName) {
-            promised[.png] = (id, .png)
-        } else if let id = standard(WindowsClipboard.dibV5) ?? standard(WindowsClipboard.dib) {
-            promised[.png] = (id, .bitmap)
+        var requested: [ClipboardChannel.RemoteFormat] = []
+        func add(_ type: NSPasteboard.PasteboardType, _ id: UInt32?, _ kind: WindowsClipboard.Kind) {
+            if let id { requested.append(.init(type: type.rawValue, id: id, kind: kind)) }
         }
-        guard !promised.isEmpty else { return } // e.g. only files, which aren't shared yet
-
+        add(.string, standard(WindowsClipboard.unicodeText), .text)
+        add(.html, named(WindowsClipboard.htmlName), .html)
+        add(.rtf, named(WindowsClipboard.rtfName), .rtf)
+        if let png = named(WindowsClipboard.pngName) {
+            add(.png, png, .png)
+        } else {
+            add(.png, standard(WindowsClipboard.dibV5) ?? standard(WindowsClipboard.dib), .bitmap)
+        }
+        guard !requested.isEmpty else {
+            channel.prefetch([]) { _, _ in }
+            return
+        }
+        // Invalidate the previous copy immediately. An early paste must not
+        // accidentally insert old contents while the new data is in transit.
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        let item = NSPasteboardItem()
-        item.setDataProvider(self, forTypes: Array(promised.keys))
-        pasteboard.writeObjects([item])
-        self.promised = promised
         ownChange = pasteboard.changeCount
         seenChange = pasteboard.changeCount
+        // The expected change count lives on the main actor with the cache.
+        let revision = ClipboardRevision(pasteboard.changeCount)
+        channel.prefetch(requested) { [weak self] type, data in
+            DispatchQueue.main.async {
+                guard let self, !self.stopped, self.incomingGeneration == generation,
+                      NSPasteboard.general.changeCount == revision.value else { return }
+                self.incomingData[NSPasteboard.PasteboardType(type)] = data
+                let item = NSPasteboardItem()
+                for (type, data) in self.incomingData { item.setData(data, forType: type) }
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.writeObjects([item])
+                revision.value = pasteboard.changeCount
+                self.ownChange = pasteboard.changeCount
+                self.seenChange = pasteboard.changeCount
+            }
+        }
     }
 
-    /// A Mac app pastes what Windows copied. AppKit calls this on the main
-    /// thread and needs the data before it returns, so it waits for Windows.
-    nonisolated func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem,
-                                provideDataForType type: NSPasteboard.PasteboardType) {
-        let promise = MainActor.assumeIsolated { promised[type] }
-        guard let (id, kind) = promise, let raw = channel.fetch(id, timeout: 10) else { return }
-        switch kind {
-        case .text: WindowsClipboard.text(fromUnicode: raw).map { _ = item.setString($0, forType: type) }
-        case .html: WindowsClipboard.html(fromHTMLFormat: raw).map { _ = item.setString($0, forType: type) }
-        case .rtf, .png: item.setData(raw, forType: type)
-        case .bitmap: WindowsClipboard.png(fromDIB: raw).map { _ = item.setData($0, forType: type) }
-        }
+    @MainActor private final class ClipboardRevision {
+        var value: Int
+        init(_ value: Int) { self.value = value }
     }
 
     private func poll() {

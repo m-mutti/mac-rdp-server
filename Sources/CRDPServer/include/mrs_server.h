@@ -101,10 +101,20 @@ int mrs_session_send_h264(mrs_session *session, uint32_t generation, uint32_t in
 /// Frames queued or sent but not yet acknowledged by the client.
 uint32_t mrs_session_frames_in_flight(mrs_session *session);
 /// Milliseconds the client takes to acknowledge a frame, smoothed. `alone`
-/// counts frames sent while no other was in flight, so it is the network and
-/// the client's decoder alone; `all` also includes any queue building up.
+/// is the minimum observed over the recent 10–20 seconds; `all` includes any
+/// queue building up. The baseline updates during continuous motion too.
 /// Both are 0 until the first acknowledgement.
 void mrs_session_ack_delay(mrs_session *session, double *alone, double *all);
+/// Encoded payload bytes queued or not yet cumulatively acknowledged.
+uint64_t mrs_session_video_bytes(mrs_session *session);
+typedef struct {
+    uint32_t frames;
+    uint64_t bytes;
+    uint64_t acknowledgements;
+    double baseline_ms, delay_ms;
+} mrs_video_state;
+/// One consistent snapshot; acknowledgements is monotonic for the session.
+void mrs_session_get_video_state(mrs_session *session, mrs_video_state *state);
 /// Replaces the client's cursor. `bgra` is top-down with straight alpha, at most
 /// 96x96. NULL hides the cursor.
 int mrs_session_set_pointer(mrs_session *session, const uint8_t *bgra, uint32_t width,

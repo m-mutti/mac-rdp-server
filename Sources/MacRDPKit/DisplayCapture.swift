@@ -58,7 +58,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate, @
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         config.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFrameRate))
-        config.queueDepth = 6
+        config.queueDepth = 4
         // The client draws the pointer locally from shape updates, which hides
         // network latency; baking it into the video would show it twice.
         config.showsCursor = false

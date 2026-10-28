@@ -34,14 +34,21 @@ struct H264EncoderTests {
         #expect(nals == [Data([0x67, 0xAA]), Data([0x68, 0xBB]), Data([0x65])])
     }
 
+    @Test func bitrateCanChangeWithoutBreakingDecoderReferences() throws {
+        let units = try encode(frames: 8, keyframeAt: [], retuneAt: 4)
+        #expect(units.count == 8)
+        #expect(try decode(units).count == 8)
+    }
+
     // MARK: helpers
 
-    private func encode(frames: Int, keyframeAt: Set<Int>) throws -> [H264Encoder.AccessUnit] {
+    private func encode(frames: Int, keyframeAt: Set<Int>, retuneAt: Int? = nil) throws -> [H264Encoder.AccessUnit] {
         let collected = OSAllocatedUnfairLock(initialState: [H264Encoder.AccessUnit]())
         let encoder = try H264Encoder(width: width, height: height) { unit in
             collected.withLock { $0.append(unit) }
         }
         for i in 0..<frames {
+            if i == retuneAt { #expect(encoder.setBitrate(2_000_000, frameRate: 30)) }
             if keyframeAt.contains(i) { encoder.requestKeyframe() }
             encoder.encode(try syntheticFrame(shift: i * 24), at: CMTime(value: CMTimeValue(i), timescale: 60))
             encoder.flush()

@@ -6,14 +6,42 @@ import MacRDPKit
 final class StreamSet: @unchecked Sendable {
     private let lock = NSLock()
     private var streams: [MonitorStream] = []
+    private let queue = DispatchQueue(label: "mac-rdp-server.video", qos: .userInteractive)
+    private var timer: DispatchSourceTimer?
+    private var turn = 0
 
     var isEmpty: Bool { lock.withLock { streams.isEmpty } }
 
     func replace(with new: [MonitorStream]) -> [MonitorStream] {
         lock.withLock {
+            timer?.cancel()
+            timer = nil
+            if !new.isEmpty {
+                let timer = DispatchSource.makeTimerSource(queue: queue)
+                timer.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .milliseconds(1))
+                timer.setEventHandler { [weak self] in self?.pump() }
+                timer.resume()
+                self.timer = timer
+            }
             defer { streams = new }
             return streams
         }
+    }
+
+    deinit { timer?.cancel() }
+
+    /// All encoder submissions use one queue; rotate priority across monitors.
+    func requestPump() {
+        queue.async { [weak self] in self?.pump() }
+    }
+
+    private func pump() {
+        let ordered: [MonitorStream] = lock.withLock {
+            guard !streams.isEmpty else { return [] }
+            turn = (turn + 1) % streams.count
+            return Array(streams[turn...] + streams[..<turn])
+        }
+        ordered.forEach { $0.pump() }
     }
 
     func forEach(_ body: (MonitorStream) -> Void) {
@@ -39,6 +67,8 @@ final class HostSession {
     private var cursor: CursorMirror?
     private var generation: UInt32 = 0
     private var graphicsReady = false
+    private var startingStreams = false
+    private var streamRevision: UInt64 = 0
     private var displaysReady = false
     /// Display changes are serialized; requests arriving meanwhile coalesce here.
     private var reconfiguring = false
@@ -165,6 +195,7 @@ final class HostSession {
 
     private func apply(_ new: MonitorLayout) async {
         log("client layout changed")
+        displaysReady = false
         await stopStreams()
         do {
             monitors = try await displays.apply(new, scaling: options.scaling, physical: options.physical,
@@ -174,6 +205,7 @@ final class HostSession {
             return
         }
         layout = new
+        displaysReady = true
         generation &+= 1
         link.resetLayout(new, generation: generation)
         injector.target(layout: new, monitors: monitors)
@@ -182,25 +214,37 @@ final class HostSession {
     }
 
     private func startStreamsIfReady() async {
-        guard graphicsReady, displaysReady, !ended, streams.isEmpty else { return }
+        guard graphicsReady, displaysReady, !ended, !startingStreams, streams.isEmpty else { return }
+        startingStreams = true
+        defer { startingStreams = false }
+        let revision = streamRevision
+        let monitors = self.monitors
+        let specs = layout.monitors
+        let generation = self.generation
         var started: [MonitorStream] = []
+        var failure: Error?
         do {
             for monitor in monitors {
                 let stream = try MonitorStream(index: monitor.index, monitor: monitor,
-                                               spec: layout.monitors[monitor.index],
+                                               spec: specs[monitor.index],
                                                generation: generation, link: link,
                                                profile: options.h264Profile)
                 try await stream.start()
                 started.append(stream)
             }
         } catch {
+            failure = error
+        }
+        guard !ended, revision == streamRevision else {
             for stream in started { await stream.stop() }
-            fail("cannot capture the screen: \(error.localizedDescription)"
-                + " — allow mac-rdp-server under System Settings › Privacy & Security › Screen & System Audio Recording")
+            startingStreams = false
+            if !ended { await startStreamsIfReady() }
             return
         }
-        guard !ended else {
+        if let failure {
             for stream in started { await stream.stop() }
+            fail("cannot capture the screen: \(failure.localizedDescription)"
+                + " — allow mac-rdp-server under System Settings › Privacy & Security › Screen & System Audio Recording")
             return
         }
         _ = streams.replace(with: started)
@@ -214,6 +258,7 @@ final class HostSession {
     }
 
     private func stopStreams() async {
+        streamRevision &+= 1
         cursor?.stop()
         cursor = nil
         for stream in streams.replace(with: []) {

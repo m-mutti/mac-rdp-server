@@ -100,6 +100,7 @@ typedef struct mrs_job {
 typedef struct {
     uint32_t frame_id;
     uint64_t sent_at; // GetTickCount64; 0 once acknowledged
+    size_t bytes;
     BOOL alone;       // nothing else was in flight
 } mrs_sent_frame;
 
@@ -147,11 +148,15 @@ typedef struct {
     pthread_mutex_t lock;
     mrs_job *head, *tail;
     uint32_t queued_frames;
+    uint64_t queued_bytes;
     uint32_t last_frame_id;
     uint32_t last_acked_frame_id;
     BOOL acks_suspended;
     // Milliseconds from sending a frame to its acknowledgement, smoothed.
     double ack_delay, ack_delay_alone;
+    uint64_t acknowledgements;
+    uint64_t baseline_epoch;
+    double baseline_current, baseline_previous;
     HANDLE job_event;
 } mrs_peer;
 
@@ -329,15 +334,36 @@ static UINT mrs_gfx_frame_ack(RdpgfxServerContext *gfx, const RDPGFX_FRAME_ACKNO
     double delay = -1;
     if (sent->frame_id == ack->frameId && sent->sent_at != 0) {
         delay = (double)(GetTickCount64() - sent->sent_at);
-        sent->sent_at = 0;
     }
     pthread_mutex_lock(&p->lock);
-    p->last_acked_frame_id = ack->frameId;
+    // Acknowledgements are cumulative. Ignore stale/future IDs, including
+    // special IDs accompanying a suspend notification.
+    if ((int32_t)(ack->frameId - p->last_acked_frame_id) > 0 &&
+        (int32_t)(p->last_frame_id - ack->frameId) >= 0) {
+        p->last_acked_frame_id = ack->frameId;
+        for (size_t i = 0; i < MRS_SENT_HISTORY; i++) {
+            if (p->sent[i].sent_at &&
+                (int32_t)(ack->frameId - p->sent[i].frame_id) >= 0)
+                p->sent[i].sent_at = 0;
+        }
+    }
     p->acks_suspended = ack->queueDepth == SUSPEND_FRAME_ACKNOWLEDGEMENT;
     if (delay >= 0) {
+        p->acknowledgements++;
         mrs_smooth(&p->ack_delay, delay);
-        if (sent->alone)
-            mrs_smooth(&p->ack_delay_alone, delay);
+        // A rolling minimum also learns during uninterrupted motion. The
+        // old isolated-frame estimate could remain inflated after startup.
+        const uint64_t epoch = GetTickCount64() / 10000;
+        if (epoch != p->baseline_epoch) {
+            p->baseline_previous = epoch == p->baseline_epoch + 1 ? p->baseline_current : 0;
+            p->baseline_current = 0;
+            p->baseline_epoch = epoch;
+        }
+        const double sample = delay < 1 ? 1 : delay;
+        if (!p->baseline_current || sample < p->baseline_current)
+            p->baseline_current = sample;
+        p->ack_delay_alone = p->baseline_previous > 0 && p->baseline_previous < p->baseline_current
+                                ? p->baseline_previous : p->baseline_current;
     }
     pthread_mutex_unlock(&p->lock);
     p->stat_acks++;
@@ -371,9 +397,10 @@ static void mrs_send_frame(mrs_peer *p, const mrs_job *job) {
     pthread_mutex_lock(&p->lock);
     const BOOL alone = !p->acks_suspended && p->last_frame_id == p->last_acked_frame_id;
     const UINT32 frame_id = ++p->last_frame_id;
-    pthread_mutex_unlock(&p->lock);
     p->sent[frame_id % MRS_SENT_HISTORY] =
-        (mrs_sent_frame){.frame_id = frame_id, .sent_at = GetTickCount64(), .alone = alone};
+        (mrs_sent_frame){.frame_id = frame_id, .sent_at = GetTickCount64(),
+                         .bytes = job->length, .alone = alone};
+    pthread_mutex_unlock(&p->lock);
 
     const RDPGFX_START_FRAME_PDU start = {.timestamp = mrs_timestamp(), .frameId = frame_id};
     const RDPGFX_END_FRAME_PDU end = {.frameId = frame_id};
@@ -397,7 +424,7 @@ static void mrs_report_stats(mrs_peer *p) {
     double delay = 0, alone = 0;
     mrs_session_ack_delay(as_session(p), &alone, &delay);
     mrs_log("video: %.1f fps sent, %.1f fps acknowledged, %.1f Mbit/s, %u in flight, "
-            "acknowledged in %.0f ms (%.0f ms alone)",
+            "acknowledged in %.0f ms (%.0f ms baseline)",
            p->stat_frames * 1000.0 / elapsed, p->stat_acks * 1000.0 / elapsed,
            p->stat_bytes * 8.0 / 1000.0 / elapsed, mrs_session_frames_in_flight(as_session(p)),
            delay, alone);
@@ -467,8 +494,10 @@ static int mrs_enqueue(mrs_peer *p, mrs_job *job) {
     else
         p->head = job;
     p->tail = job;
-    if (job->kind == MRS_JOB_FRAME)
+    if (job->kind == MRS_JOB_FRAME) {
         p->queued_frames++;
+        p->queued_bytes += job->length;
+    }
     pthread_mutex_unlock(&p->lock);
     SetEvent(p->job_event);
     return 0;
@@ -645,6 +674,7 @@ static void mrs_run_jobs(mrs_peer *p) {
                 mrs_send_frame(p, job);
             pthread_mutex_lock(&p->lock);
             p->queued_frames--;
+            p->queued_bytes -= job->length;
             pthread_mutex_unlock(&p->lock);
             break;
         case MRS_JOB_POINTER:
@@ -709,6 +739,34 @@ void mrs_session_ack_delay(mrs_session *session, double *alone, double *all) {
     pthread_mutex_lock(&p->lock);
     *alone = p->ack_delay_alone;
     *all = p->ack_delay;
+    pthread_mutex_unlock(&p->lock);
+}
+
+uint64_t mrs_session_video_bytes(mrs_session *session) {
+    mrs_peer *p = as_peer(session);
+    pthread_mutex_lock(&p->lock);
+    uint64_t bytes = p->queued_bytes;
+    if (!p->acks_suspended) {
+        for (size_t i = 0; i < MRS_SENT_HISTORY; i++)
+            if (p->sent[i].sent_at)
+                bytes += p->sent[i].bytes;
+    }
+    pthread_mutex_unlock(&p->lock);
+    return bytes;
+}
+
+void mrs_session_get_video_state(mrs_session *session, mrs_video_state *state) {
+    mrs_peer *p = as_peer(session);
+    pthread_mutex_lock(&p->lock);
+    *state = (mrs_video_state){.frames = p->queued_frames, .bytes = p->queued_bytes,
+                              .acknowledgements = p->acknowledgements,
+                              .baseline_ms = p->ack_delay_alone, .delay_ms = p->ack_delay};
+    if (!p->acks_suspended) {
+        state->frames += p->last_frame_id - p->last_acked_frame_id;
+        for (size_t i = 0; i < MRS_SENT_HISTORY; i++)
+            if (p->sent[i].sent_at)
+                state->bytes += p->sent[i].bytes;
+    }
     pthread_mutex_unlock(&p->lock);
 }
 

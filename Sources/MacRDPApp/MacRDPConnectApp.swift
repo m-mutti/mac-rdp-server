@@ -22,6 +22,9 @@ public struct MacRDPServerApp: App {
     public static func run(showing window: String?) -> Never {
         AppDelegate.initialWindow = window
         redirectOutputToLog()
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "local"
+        print("mac-rdp-server \(version) (\(build)) started (adaptive video pacing)")
         main()
         exit(0)
     }

@@ -1,5 +1,6 @@
 import CRDPServer
 import Foundation
+import LocalAuthentication
 import Security
 
 /// The user name and password Windows signs in with.
@@ -37,12 +38,12 @@ public enum CredentialStore {
         FileManager.default.fileExists(atPath: samFile(in: directory).path)
     }
 
-    public static func load(directory: URL) -> Credentials? {
+    public static func load(directory: URL, includePassword: Bool = true) -> Credentials? {
         guard let contents = try? String(contentsOf: samFile(in: directory), encoding: .utf8),
               let user = contents.split(separator: ":", omittingEmptySubsequences: false).first,
               !user.isEmpty
         else { return nil }
-        return Credentials(user: String(user), password: keychainPassword(user: String(user)))
+        return Credentials(user: String(user), password: includePassword ? keychainPassword(user: String(user)) : nil)
     }
 
     public static func save(user: String, password: String, directory: URL) throws {
@@ -85,12 +86,17 @@ public enum CredentialStore {
     }
 
     private static func keychainPassword(user: String) -> String? {
+        let context = LAContext()
+        context.interactionNotAllowed = true
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: keychainService,
             kSecAttrAccount: user,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
+            // Showing a saved password is optional. Never hold startup or
+            // remote input waiting for a Keychain authentication dialog.
+            kSecUseAuthenticationContext: context,
         ]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,

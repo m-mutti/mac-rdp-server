@@ -18,6 +18,15 @@ final class SessionLink: @unchecked Sendable {
     private let lock = NSLock()
     private var handle: OpaquePointer?
     private var monitorCount = 1
+    private var pacing = VideoPacing()
+    private var reservations: [UUID: Int] = [:]
+    private var lastPacingLog = 0.0
+
+    struct VideoBudget: Sendable {
+        let id: UUID
+        let bitrate: Int
+        let frameRate: Int
+    }
 
     init(_ handle: OpaquePointer) {
         id = Int(bitPattern: handle)
@@ -28,25 +37,50 @@ final class SessionLink: @unchecked Sendable {
         lock.withLock { handle = nil }
     }
 
-    /// Room for another frame without building latency.
-    var hasCredit: Bool {
+    /// Reserve credit before encoding, so concurrent monitors cannot all
+    /// spend the same slot. Already encoded reference frames are never dropped.
+    func reserveVideo(pixels: Int) -> VideoBudget? {
         lock.withLock {
-            guard let handle else { return false }
-            var alone = 0.0, all = 0.0
-            mrs_session_ack_delay(handle, &alone, &all)
-            let limit = FrameWindow.limit(monitors: monitorCount, aloneDelay: .milliseconds(alone),
-                                          delay: .milliseconds(all))
-            return mrs_session_frames_in_flight(handle) < limit
+            guard let handle else { return nil }
+            var state = mrs_video_state()
+            mrs_session_get_video_state(handle, &state)
+            let now = ProcessInfo.processInfo.systemUptime
+            let bitrate = pacing.bitrate(pixels: pixels, monitors: monitorCount)
+            let aggregate = min(20_000_000, bitrate * monitorCount)
+            let byteLimit = pacing.byteLimit(monitors: monitorCount, baselineMS: state.baseline_ms,
+                                             aggregateBitrate: aggregate, now: now)
+            let bytes = Int(state.bytes) + reservations.values.reduce(0, +)
+            pacing.update(now: now, baselineMS: state.baseline_ms, delayMS: state.delay_ms,
+                          bytesInFlight: Int(state.bytes), byteLimit: byteLimit,
+                          acknowledgements: state.acknowledgements)
+            let limit = FrameWindow.limit(monitors: monitorCount, aloneDelay: .milliseconds(state.baseline_ms),
+                                          delay: .milliseconds(state.delay_ms), frameRate: pacing.frameRate)
+            if now - lastPacingLog >= 5 {
+                lastPacingLog = now
+                log("pacing: target \(pacing.frameRate) fps/monitor, quality \(Int(pacing.quality * 100))%, "
+                    + "\(bytes)/\(byteLimit) video bytes outstanding, \(limit) frame slots")
+            }
+            guard Int(state.frames) + reservations.count < limit, bytes < byteLimit else { return nil }
+            let budget = VideoBudget(id: UUID(), bitrate: pacing.bitrate(pixels: pixels, monitors: monitorCount),
+                                     frameRate: pacing.frameRate)
+            reservations[budget.id] = max(1, budget.bitrate / budget.frameRate / 8)
+            return budget
         }
     }
 
-    func send(frame: Data, monitor index: Int, generation: UInt32) {
+    func cancelVideo(_ budget: VideoBudget) {
+        lock.withLock { _ = reservations.removeValue(forKey: budget.id) }
+    }
+
+    func send(frame: Data, monitor index: Int, generation: UInt32, budget: VideoBudget) -> Bool {
         lock.withLock {
-            guard let handle else { return }
-            _ = frame.withUnsafeBytes { raw in
+            guard reservations.removeValue(forKey: budget.id) != nil, let handle else { return false }
+            let sent = frame.withUnsafeBytes { raw in
                 mrs_session_send_h264(handle, generation, UInt32(index),
                                      raw.baseAddress!.assumingMemoryBound(to: UInt8.self), raw.count)
-            }
+            } == 0
+            if sent { pacing.recordFrame(bytes: frame.count, now: ProcessInfo.processInfo.systemUptime) }
+            return sent
         }
     }
 

@@ -18,9 +18,10 @@ struct FrameWindowTests {
         #expect(limit(1, alone: 1000, all: 1000) == FrameWindow.maxPerMonitor)
     }
 
-    @Test func shrinksWhenAQueueBuilds() {
+    @Test func acknowledgementSpikesDoNotCollapseTheFrameWindow() {
         #expect(limit(1, alone: 95, all: 140) == 7)
-        #expect(limit(1, alone: 95, all: 160) == 4)
-        #expect(limit(1, alone: 95, all: 400) == 3)
+        #expect(limit(1, alone: 95, all: 160) == 7)
+        #expect(limit(1, alone: 95, all: 400) == 7)
+        #expect(limit(2, alone: 52, all: 298) == limit(2, alone: 52, all: 55))
     }
 }

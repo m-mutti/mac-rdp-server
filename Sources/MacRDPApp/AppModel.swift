@@ -52,6 +52,7 @@ final class AppModel {
     @ObservationIgnored private let windows = WindowPresenter()
     @ObservationIgnored private var host: RDPHost?
     @ObservationIgnored private var refreshTimer: Timer?
+    @ObservationIgnored private var credentialReload: Task<Void, Never>?
     let configDirectory = RDPHost.defaultConfigDirectory
 
     init() {
@@ -163,7 +164,18 @@ final class AppModel {
     // MARK: Sign-in
 
     func reloadCredentials() {
-        credentials = CredentialStore.load(directory: configDirectory)
+        credentialReload?.cancel()
+        // The RDP server authenticates from users.sam; reading the optional
+        // display copy in Keychain must not delay listening or input handling.
+        credentials = CredentialStore.load(directory: configDirectory, includePassword: false)
+        let directory = configDirectory
+        credentialReload = Task { [weak self] in
+            let loaded = await Task.detached(priority: .utility) {
+                CredentialStore.load(directory: directory)
+            }.value
+            guard !Task.isCancelled, let self, self.credentials?.user == loaded?.user else { return }
+            self.credentials = loaded
+        }
     }
 
     func saveCredentials(user: String, password: String) throws {

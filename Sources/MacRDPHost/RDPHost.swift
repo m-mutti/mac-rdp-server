@@ -200,7 +200,7 @@ public final class RDPHost {
             }
         }
         cb.frames_acked = { user, session in
-            RDPHost.from(user).streams(of: Int(bitPattern: session))?.forEach { $0.pump() }
+            RDPHost.from(user).streams(of: Int(bitPattern: session))?.requestPump()
         }
         cb.refresh_requested = { user, session in
             RDPHost.from(user).streams(of: Int(bitPattern: session))?.forEach { $0.refresh() }

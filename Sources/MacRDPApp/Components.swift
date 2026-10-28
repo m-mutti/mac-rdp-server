@@ -116,7 +116,7 @@ struct CredentialsForm: View {
 
             Group {
                 if saved != nil && saved?.password == nil && password.isEmpty {
-                    Text("A password is set, but it was saved from the command line and can't be shown. Enter a new one to change it.")
+                    Text("A password is set, but its saved copy isn't available to show. Enter a new one to change it.")
                 } else {
                     Text("Windows asks for these when you connect. Use at least \(CredentialStore.minimumPasswordLength) characters.")
                 }

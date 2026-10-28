@@ -12,22 +12,21 @@ public enum FrameWindow {
     static let maxPerMonitor = 15
 
     /// - Parameters:
-    ///   - aloneDelay: how long the client takes to acknowledge a frame sent
-    ///     while no other was in flight, which is the network and its decoder
-    ///     alone. Zero until the first acknowledgement.
+    ///   - aloneDelay: recent minimum acknowledgement delay, used as the
+    ///     baseline for network and decoder latency. Zero until measured.
     ///   - delay: the same for all recent frames, which also counts any queue
     ///     building up.
-    public static func limit(monitors: Int, aloneDelay: Duration, delay: Duration) -> Int {
+    public static func limit(monitors: Int, aloneDelay: Duration, delay: Duration,
+                             frameRate: Int = 60) -> Int {
         // A frame per monitor plus a little slack, which is plenty on a local network.
         let minimum = monitors + 2
         guard aloneDelay > .zero else { return minimum }
-        // Enough frames to keep each monitor at 60 fps through the round trip.
-        var perMonitor = min(Int((aloneDelay / frameTime).rounded(.up)) + 1, maxPerMonitor)
-        // More than three frames' worth of queue means the network is full,
-        // so send only about as fast as frames are getting through.
-        if delay - aloneDelay > frameTime * 3 {
-            perMonitor = Int(Double(perMonitor) * (aloneDelay / delay))
-        }
+        // Enough frames to sustain the selected rate through the round trip.
+        let interval = Duration.seconds(1) / max(1, frameRate)
+        let perMonitor = min(Int((aloneDelay / interval).rounded(.up)) + 1, maxPerMonitor)
+        // An ACK spike alone isn't evidence of a full video queue. Shrinking
+        // this window as well as the byte budget caused stop-and-wait bursts.
+        // SessionLink bounds byte pressure; retain enough frame slots for motion.
         return max(minimum, monitors * perMonitor)
     }
 }
